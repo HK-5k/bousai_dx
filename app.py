@@ -51,17 +51,19 @@ h1 {
     margin-bottom: 0.5rem !important;
 }
 
-/* グリッドレイアウト */
+/* --- グリッドレイアウト（スマホ2列固定） --- */
 .kpi-grid-container {
     display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 10px;
+    grid-template-columns: repeat(2, 1fr); /* 2列強制 */
+    gap: 12px;
     margin-bottom: 15px;
 }
+
+/* カードデザイン */
 .kpi-card {
     background: white;
-    padding: 10px;
-    border-radius: 10px;
+    padding: 12px 5px;
+    border-radius: 12px;
     box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     text-align: center;
     display: flex;
@@ -71,6 +73,12 @@ h1 {
     height: 110px;
     border: 1px solid #eee;
 }
+/* 4つ目のカード用の特別な色（ここで指定するからエラーにならない） */
+.kpi-card.gray-bg {
+    background-color: #f8f9fa;
+    border: 1px dashed #ddd;
+}
+
 .kpi-icon { font-size: 1.8rem; margin-bottom: 5px; }
 .kpi-label { font-size: 0.75rem; color: #888; font-weight: bold; }
 .kpi-value { font-size: 1.2rem; font-weight: bold; color: #333; }
@@ -124,15 +132,10 @@ def extract_date(text):
         except: return None
     return None
 
-# --- HTML生成ヘルパー関数 ---
-def make_card(icon, label, value, unit, color="#333"):
-    return f"""
-    <div class="kpi-card">
-        <div class="kpi-icon">{icon}</div>
-        <div class="kpi-label">{label}</div>
-        <div class="kpi-value" style="color:{color}">{int(value)}<span class="kpi-unit">{unit}</span></div>
-    </div>
-    """
+# --- HTML生成関数（安全版） ---
+def make_card(icon, label, value, unit, color="#333", extra_class=""):
+    # インデントや改行を一切入れない1行の文字列にする（エラー回避の鉄則）
+    return f"""<div class="kpi-card {extra_class}"><div class="kpi-icon">{icon}</div><div class="kpi-label">{label}</div><div class="kpi-value" style="color:{color}">{int(value)}<span class="kpi-unit">{unit}</span></div></div>"""
 
 # --- ヘッダー ---
 col_h1, col_h2 = st.columns([1, 4])
@@ -140,7 +143,7 @@ with col_h2:
     st.markdown("""
     <div style="padding-top: 5px;">
         <h1 style="text-align: left; margin:0; font-size:1.5rem;">香川防災DX</h1>
-        <p style="color: #666; font-size: 0.8rem; margin:0;">備蓄品在庫管理システム v3.4</p>
+        <p style="color: #666; font-size: 0.8rem; margin:0;">備蓄品在庫管理システム v3.6</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -149,7 +152,6 @@ tab1, tab2, tab3, tab4 = st.tabs(["📊 サマリー", "📸 登録", "📋 在�
 # ========== 1. ダッシュボード ==========
 with tab1:
     stocks = db.get_all_stocks()
-    # データがない場合は空リストとして扱う（エラー回避）
     if stocks is None: stocks = []
     
     if not stocks:
@@ -198,34 +200,33 @@ with tab1:
                     cnt_yellow += 1
                     items_yellow.append(item_info)
 
+        # ----------------------------------------------------
+        # 画面表示（ここが修正ポイント）
+        # ----------------------------------------------------
         st.markdown("### 📦 備蓄状況")
         
-        # HTMLを文字列として構築
-        html_main = f"""
-        <div class="kpi-grid-container">
-            {make_card("📊", "登録アイテム", cnt_total, "件")}
-            {make_card("💧", "水・飲料", water_qty, "L", "#007bff")}
-            {make_card("🍱", "食料", food_qty, "食", "#ff9800")}
-            <div class="kpi-card" style="background:#f9f9f9;">
-                <div style="font-size:0.8rem; color:#aaa;">その他</div>
-                <div style="font-weight:bold;">{cnt_total}</div>
-            </div>
-        </div>
-        """
-        # ここで確実にHTMLとして描画する
+        # 1. パーツを作る
+        c1 = make_card("📊", "登録アイテム", cnt_total, "件")
+        c2 = make_card("💧", "水・飲料", water_qty, "L", "#007bff")
+        c3 = make_card("🍱", "食料", food_qty, "食", "#ff9800")
+        # 4つ目：CSSクラス 'gray-bg' を使って色を変える（styleタグを使わない）
+        c4 = make_card("📦", "その他", cnt_total, "件", color="#333", extra_class="gray-bg")
+        
+        # 2. 連結する（隙間なく）
+        html_main = f"""<div class="kpi-grid-container">{c1}{c2}{c3}{c4}</div>"""
+        
+        # 3. 描画する
         st.markdown(html_main, unsafe_allow_html=True)
+        
         
         st.markdown("### 🏥 生活・資機材")
         
-        html_sub = f"""
-        <div class="kpi-grid-container">
-            {make_card("🚽", "トイレ・衛生", toilet_qty, "回")}
-            {make_card("👶", "乳幼児用品", baby_qty, "点")}
-            {make_card("🛏️", "寝具・毛布", sleep_qty, "枚")}
-            {make_card("🔋", "資機材", tools_qty, "台")}
-        </div>
-        """
-        # ここも確実にHTMLとして描画
+        sc1 = make_card("🚽", "トイレ・衛生", toilet_qty, "回")
+        sc2 = make_card("👶", "乳幼児用品", baby_qty, "点")
+        sc3 = make_card("🛏️", "寝具・毛布", sleep_qty, "枚")
+        sc4 = make_card("🔋", "資機材", tools_qty, "台")
+        
+        html_sub = f"""<div class="kpi-grid-container">{sc1}{sc2}{sc3}{sc4}</div>"""
         st.markdown(html_sub, unsafe_allow_html=True)
 
         # --- アラート ---
