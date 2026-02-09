@@ -51,7 +51,7 @@ h1 {
     margin-bottom: 0.5rem !important;
 }
 
-/* スマホ用グリッドレイアウト */
+/* グリッドレイアウト */
 .kpi-grid-container {
     display: grid;
     grid-template-columns: repeat(2, 1fr);
@@ -124,13 +124,23 @@ def extract_date(text):
         except: return None
     return None
 
+# --- HTML生成ヘルパー関数 ---
+def make_card(icon, label, value, unit, color="#333"):
+    return f"""
+    <div class="kpi-card">
+        <div class="kpi-icon">{icon}</div>
+        <div class="kpi-label">{label}</div>
+        <div class="kpi-value" style="color:{color}">{int(value)}<span class="kpi-unit">{unit}</span></div>
+    </div>
+    """
+
 # --- ヘッダー ---
 col_h1, col_h2 = st.columns([1, 4])
 with col_h2:
     st.markdown("""
     <div style="padding-top: 5px;">
         <h1 style="text-align: left; margin:0; font-size:1.5rem;">香川防災DX</h1>
-        <p style="color: #666; font-size: 0.8rem; margin:0;">備蓄品在庫管理システム v3.2</p>
+        <p style="color: #666; font-size: 0.8rem; margin:0;">備蓄品在庫管理システム v3.4</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -139,98 +149,98 @@ tab1, tab2, tab3, tab4 = st.tabs(["📊 サマリー", "📸 登録", "📋 在�
 # ========== 1. ダッシュボード ==========
 with tab1:
     stocks = db.get_all_stocks()
+    # データがない場合は空リストとして扱う（エラー回避）
+    if stocks is None: stocks = []
+    
     if not stocks:
         st.info("ℹ️ データがありません。「📸 登録」タブから開始してください。")
-        st.stop()
-    
-    today = datetime.now().date()
-    
-    # --- 集計 ---
-    cnt_total = len(stocks)
-    water_qty = 0
-    food_qty = 0
-    toilet_qty = 0
-    baby_qty = 0
-    sleep_qty = 0
-    tools_qty = 0
-    
-    cnt_red = 0
-    cnt_yellow = 0
-    items_red = []
-    items_yellow = []
-
-    alert_months = 6
-
-    for s in stocks:
-        cat = str(s.get('category') or "")
-        qty = float(s.get('qty') or 0)
+    else:
+        today = datetime.now().date()
         
-        if "水" in cat or "飲料" in cat: water_qty += qty
-        elif "主食" in cat or "副食" in cat: food_qty += qty
-        elif "トイレ" in cat or "衛生" in cat: toilet_qty += qty
-        elif "乳幼児" in cat or "ミルク" in cat: baby_qty += qty
-        elif "寝具" in cat or "避難" in cat or "毛布" in cat: sleep_qty += qty
-        elif "資機材" in cat or "設備" in cat or "電池" in cat: tools_qty += qty
-
-        exp_date = extract_date(s.get('memo', ''))
-        item_info = {"品名": s['item'], "数量": s['qty'], "期限": exp_date}
+        # --- 集計 ---
+        cnt_total = len(stocks)
+        water_qty = 0
+        food_qty = 0
+        toilet_qty = 0
+        baby_qty = 0
+        sleep_qty = 0
+        tools_qty = 0
         
-        if exp_date:
-            if exp_date < today:
-                cnt_red += 1
-                items_red.append(item_info)
-            elif exp_date <= today + relativedelta(months=alert_months):
-                cnt_yellow += 1
-                items_yellow.append(item_info)
+        cnt_red = 0
+        cnt_yellow = 0
+        items_red = []
+        items_yellow = []
 
-    # --- HTML生成関数 ---
-    def make_card(icon, label, value, unit, color="#333"):
-        return f"""
-        <div class="kpi-card">
-            <div class="kpi-icon">{icon}</div>
-            <div class="kpi-label">{label}</div>
-            <div class="kpi-value" style="color:{color}">{int(value)}<span class="kpi-unit">{unit}</span></div>
+        alert_months = 6
+
+        for s in stocks:
+            cat = str(s.get('category') or "")
+            try:
+                qty = float(s.get('qty') or 0)
+            except:
+                qty = 0.0
+            
+            if "水" in cat or "飲料" in cat: water_qty += qty
+            elif "主食" in cat or "副食" in cat: food_qty += qty
+            elif "トイレ" in cat or "衛生" in cat: toilet_qty += qty
+            elif "乳幼児" in cat or "ミルク" in cat: baby_qty += qty
+            elif "寝具" in cat or "避難" in cat or "毛布" in cat: sleep_qty += qty
+            elif "資機材" in cat or "設備" in cat or "電池" in cat: tools_qty += qty
+
+            exp_date = extract_date(s.get('memo', ''))
+            item_info = {"品名": s['item'], "数量": s['qty'], "期限": exp_date}
+            
+            if exp_date:
+                if exp_date < today:
+                    cnt_red += 1
+                    items_red.append(item_info)
+                elif exp_date <= today + relativedelta(months=alert_months):
+                    cnt_yellow += 1
+                    items_yellow.append(item_info)
+
+        st.markdown("### 📦 備蓄状況")
+        
+        # HTMLを文字列として構築
+        html_main = f"""
+        <div class="kpi-grid-container">
+            {make_card("📊", "登録アイテム", cnt_total, "件")}
+            {make_card("💧", "水・飲料", water_qty, "L", "#007bff")}
+            {make_card("🍱", "食料", food_qty, "食", "#ff9800")}
+            <div class="kpi-card" style="background:#f9f9f9;">
+                <div style="font-size:0.8rem; color:#aaa;">その他</div>
+                <div style="font-weight:bold;">{cnt_total}</div>
+            </div>
         </div>
         """
-
-    st.markdown("### 📦 備蓄状況")
-    
-    # HTMLを作成してから表示（エラー防止）
-    html_main = f"""
-    <div class="kpi-grid-container">
-        {make_card("📊", "登録アイテム", cnt_total, "件")}
-        {make_card("💧", "水・飲料", water_qty, "L", "#007bff")}
-        {make_card("🍱", "食料", food_qty, "食", "#ff9800")}
-        <div class="kpi-card" style="background:#f9f9f9;">
-            <div style="font-size:0.8rem; color:#aaa;">その他</div>
-            <div style="font-weight:bold;">{cnt_total}</div>
+        # ここで確実にHTMLとして描画する
+        st.markdown(html_main, unsafe_allow_html=True)
+        
+        st.markdown("### 🏥 生活・資機材")
+        
+        html_sub = f"""
+        <div class="kpi-grid-container">
+            {make_card("🚽", "トイレ・衛生", toilet_qty, "回")}
+            {make_card("👶", "乳幼児用品", baby_qty, "点")}
+            {make_card("🛏️", "寝具・毛布", sleep_qty, "枚")}
+            {make_card("🔋", "資機材", tools_qty, "台")}
         </div>
-    </div>
-    """
-    st.markdown(html_main, unsafe_allow_html=True)
-    
-    st.markdown("### 🏥 生活・資機材")
-    html_sub = f"""
-    <div class="kpi-grid-container">
-        {make_card("🚽", "トイレ・衛生", toilet_qty, "回")}
-        {make_card("👶", "乳幼児用品", baby_qty, "点")}
-        {make_card("🛏️", "寝具・毛布", sleep_qty, "枚")}
-        {make_card("🔋", "資機材", tools_qty, "台")}
-    </div>
-    """
-    st.markdown(html_sub, unsafe_allow_html=True)
+        """
+        # ここも確実にHTMLとして描画
+        st.markdown(html_sub, unsafe_allow_html=True)
 
-    # --- アラート ---
-    if cnt_red > 0:
-        st.markdown(f"""
-        <div style="background:#fff5f5; border-left:5px solid #ff4b4b; padding:10px; border-radius:4px; margin-top:10px; margin-bottom:10px;">
-            <strong style="color:#c62828;">⚠️ 期限切れ ({cnt_red}件)</strong>
-        </div>
-        """, unsafe_allow_html=True)
-        st.dataframe(pd.DataFrame(items_red), hide_index=True, use_container_width=True)
-    
-    if cnt_red == 0 and cnt_yellow == 0:
-        st.success("✅ アラートなし（健全）")
+        # --- アラート ---
+        if cnt_red > 0:
+            st.markdown(f"""
+            <div style="background:#fff5f5; border-left:5px solid #ff4b4b; padding:10px; border-radius:4px; margin-top:10px; margin-bottom:10px;">
+                <strong style="color:#c62828;">⚠️ 期限切れ ({cnt_red}件)</strong>
+            </div>
+            """, unsafe_allow_html=True)
+            if items_red:
+                st.dataframe(pd.DataFrame(items_red), hide_index=True, use_container_width=True)
+        
+        if cnt_red == 0 and cnt_yellow == 0:
+            st.success("✅ アラートなし（健全）")
+
 
 # ========== 2. 登録 ==========
 with tab2:
