@@ -31,17 +31,15 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# CSS（スマホ完全対応・タイトル見切れ防止・ボタン調整）
+# CSS
 st.markdown("""
 <style>
-/* 全体の余白を詰める */
 .block-container { 
     padding-top: 1rem !important; 
     padding-bottom: 2rem !important; 
     padding-left: 0.5rem !important; 
     padding-right: 0.5rem !important; 
 }
-/* タイトル見切れ防止 */
 h1 {
     font-size: clamp(1.5rem, 5vw, 2.2rem) !important;
     white-space: normal !important;
@@ -49,7 +47,6 @@ h1 {
     line-height: 1.3 !important;
     text-align: center;
 }
-/* ボタンをスマホで押しやすく */
 .stButton > button {
     width: 100% !important;
     min-height: 50px !important;
@@ -57,12 +54,10 @@ h1 {
     border-radius: 12px !important;
     font-weight: bold !important;
 }
-/* タブの文字サイズ */
 .stTabs [data-baseweb="tab"] {
     font-size: 1rem !important;
     padding: 0.5rem !important;
 }
-/* カードデザイン */
 .stock-card {
     background-color: #f8f9fa;
     border: 1px solid #ddd;
@@ -70,7 +65,6 @@ h1 {
     padding: 15px;
     margin-bottom: 10px;
 }
-/* 期限切れ警告 */
 .alert-expired { color: #d32f2f; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
@@ -86,39 +80,52 @@ model = genai.GenerativeModel("gemini-2.5-flash")
 # DB初期化
 db.init_db()
 
-# --- タイトル表示（HTMLで強制リサイズ） ---
+# --- タイトル ---
 st.markdown("""
 <h1>⛑️ 香川防災DX<br><span style='font-size:0.7em; color:gray;'>備蓄管理システム</span></h1>
 """, unsafe_allow_html=True)
 
-# --- タブ構成 ---
+# --- タブ ---
 tab1, tab2, tab3, tab4 = st.tabs(["📊 サマリー", "📸 撮影", "📋 在庫一覧", "💾 データ"])
 
-# ========== 1. サマリー（ダッシュボード） ==========
+# ========== 1. サマリー（エラー修正版） ==========
 with tab1:
     st.markdown("### 備蓄状況サマリー")
     
-    # 全データを取得して集計
+    # データを取得
     stocks = db.get_all_stocks()
-    total_items = len(stocks)
     
-    # 簡易計算（デモ用ロジック：水と食料の日数試算）
-    water_total = sum([s['qty'] for s in stocks if "水" in s['category'] or "飲料" in s['category']])
-    food_total = sum([s['qty'] for s in stocks if "主食" in s['category'] or "副食" in s['category']])
+    # --- 【ここが修正箇所】安全な計算ロジック ---
+    water_total = 0
+    food_total = 0
     
-    # 想定人数（スライダー）
+    for s in stocks:
+        try:
+            # データが壊れていても無視して計算する
+            qty = float(s.get('qty') or 0)  # 数字に変換できなければ0
+            cat = str(s.get('category') or "") # 文字列に変換
+            
+            if "水" in cat or "飲料" in cat:
+                water_total += qty
+            elif "主食" in cat or "副食" in cat:
+                food_total += qty
+        except:
+            continue # エラーデータはスキップ
+    # ----------------------------------------
+
+    # 想定人数
     people = st.slider("避難想定人数", 1, 100, 10)
     
-    # 日数計算（水3L/人, 食料3食/人と仮定）
-    days_water = round(water_total / (people * 3), 1) if water_total > 0 else 0
-    days_food = round(food_total / (people * 3), 1) if food_total > 0 else 0
+    # 日数計算
+    days_water = round(water_total / (people * 3), 1) if people > 0 else 0
+    days_food = round(food_total / (people * 3), 1) if people > 0 else 0
 
-    # 大きな数字で表示（グラフ廃止）
+    # 表示
     c1, c2 = st.columns(2)
     with c1:
-        st.metric("💧 水の確保", f"{days_water} 日分", f"{water_total} L")
+        st.metric("💧 水の確保", f"{days_water} 日分", f"{int(water_total)} L")
     with c2:
-        st.metric("🍱 食料確保", f"{days_food} 日分", f"{food_total} 食")
+        st.metric("🍱 食料確保", f"{days_food} 日分", f"{int(food_total)} 食")
 
     st.divider()
     
@@ -126,8 +133,7 @@ with tab1:
     expired_count = 0
     today = datetime.now().date()
     for s in stocks:
-        memo = s.get('memo', '')
-        # 簡易的な日付抽出
+        memo = str(s.get('memo', ''))
         m = re.search(r"(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})", memo)
         if m:
             try:
@@ -142,7 +148,7 @@ with tab1:
     else:
         st.success("✅ 期限切れのアイテムはありません。")
 
-# ========== 2. 撮影（シンプル一本化） ==========
+# ========== 2. 撮影 ==========
 with tab2:
     st.markdown("### 新規登録")
     st.info("下のボタンをタップして、写真を撮ってください。")
@@ -156,7 +162,6 @@ with tab2:
         if st.button("🔍 この写真を分析して登録", type="primary"):
             with st.spinner("AIが解析中..."):
                 try:
-                    # 香川県基準カテゴリ
                     prompt = """
                     この画像を分析し、防災備蓄品データを抽出してください。
                     JSON配列形式: [{"item": "品名", "qty": 数値, "unit": "単位", "category": "カテゴリ", "date": "YYYY-MM-DD", "memo": "詳細"}]
@@ -174,7 +179,6 @@ with tab2:
                     
                     count = 0
                     for d in items:
-                        # dateがnullなら今日から3年後を入れる（仮）
                         meme_txt = d.get('memo', '')
                         date_txt = d.get('date')
                         if date_txt:
@@ -196,16 +200,15 @@ with tab2:
                 except Exception as e:
                     st.error(f"解析エラー: {e}")
 
-# ========== 3. 在庫一覧（編集・削除機能付き） ==========
+# ========== 3. 在庫一覧 ==========
 with tab3:
     st.markdown("### 在庫リスト")
     
-    # 検索機能
     search_query = st.text_input("🔍 検索（品名など）")
     
     rows = db.get_all_stocks()
     if search_query:
-        rows = [r for r in rows if search_query in r['item'] or search_query in r['memo']]
+        rows = [r for r in rows if search_query in str(r['item']) or search_query in str(r['memo'])]
         
     if not rows:
         st.info("データがありません。")
@@ -221,13 +224,12 @@ with tab3:
             </div>
             """, unsafe_allow_html=True)
             
-            # 編集・削除エリア
             with st.expander(f"🔧 編集・削除 (ID: {stock_id})"):
-                new_qty = st.number_input("数量変更", value=int(row['qty']), key=f"qty_{stock_id}")
+                new_qty = st.number_input("数量変更", value=int(row['qty'] or 0), key=f"qty_{stock_id}")
                 col_btn1, col_btn2 = st.columns(2)
                 with col_btn1:
                     if st.button("更新", key=f"upd_{stock_id}"):
-                        db.update_stock(stock_id, qty=new_qty) # update関数が必要
+                        db.update_stock(stock_id, qty=new_qty)
                         st.success("更新しました")
                         st.rerun()
                 with col_btn2:
@@ -236,13 +238,14 @@ with tab3:
                         st.error("削除しました")
                         st.rerun()
 
-# ========== 4. データ管理（CSV） ==========
+# ========== 4. データ管理 ==========
 with tab4:
     st.markdown("### データ入出力")
     
-    # CSVダウンロード
-    df = pd.DataFrame(rows)
-    if not df.empty:
+    # CSV DL
+    stocks = db.get_all_stocks()
+    if stocks:
+        df = pd.DataFrame(stocks)
         csv = df.to_csv(index=False).encode('utf-8-sig')
         st.download_button(
             "📥 CSVエクスポート",
@@ -254,25 +257,22 @@ with tab4:
     
     st.divider()
     
-    # CSVアップロード
     st.markdown("#### CSV一括登録")
     up_csv = st.file_uploader("CSVファイルをアップロード", type=["csv"])
     if up_csv:
         if st.button("一括登録を実行"):
             try:
-                # shift-jis or utf-8
                 try:
                     df_new = pd.read_csv(up_csv, encoding='shift-jis')
                 except:
                     df_new = pd.read_csv(up_csv, encoding='utf-8')
                 
-                # DBへインサート（簡易実装）
                 count = 0
                 for index, r in df_new.iterrows():
                     db.insert_stock(
                         item=str(r.get('item', r.get('品名', '不明'))),
                         qty=int(r.get('qty', r.get('数量', 0))),
-                        category=str(r.get('category', r.get('カテゴリ', 'その他'))),
+                        category=str(r.get('category', r.get('カテゴリ', '7. 資機材・重要設備'))),
                         memo=str(r.get('memo', r.get('備考', '')))
                     )
                     count += 1
