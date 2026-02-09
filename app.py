@@ -51,11 +51,11 @@ except Exception as e:
 
 db.init_db()
 
-# --- モバイルファースト用CSS（維持＋タイトルレスポンシブ） ---
+# --- iPhone向けCSS（タイトル見切れ防止・上部余白） ---
 st.markdown("""
 <style>
-h1 { font-size: clamp(1.5rem, 5vw, 3rem) !important; white-space: normal !important; word-wrap: break-word !important; }
-.block-container { padding-top: 0.5rem !important; padding-bottom: 0.5rem !important; padding-left: 0.75rem !important; padding-right: 0.75rem !important; max-width: 100% !important; }
+h1 { font-size: 1.8rem !important; white-space: normal !important; word-wrap: break-word !important; }
+.block-container { padding-top: 1.25rem !important; padding-bottom: 0.5rem !important; padding-left: 0.75rem !important; padding-right: 0.75rem !important; max-width: 100% !important; }
 .stTabs [data-baseweb="tab-list"] { gap: 0.25rem !important; }
 .stTabs [data-baseweb="tab"] { padding: 0.5rem 0.75rem !important; font-size: 1rem !important; }
 .stButton > button {
@@ -164,16 +164,13 @@ if "last_deleted_item" not in st.session_state:
     st.session_state.last_deleted_item = None
 
 st.markdown("# ⛑️ 香川防災DX")
-st.caption("備蓄品管理")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📸 撮影", "📋 在庫一覧", "📥 エクスポート", "🗃️ データ管理"])
 
-# ========== タブ1: 撮影 → AI解析 → 確認フォーム → リストに追加 or 登録（連続スキャン・カート） ==========
+# ========== タブ1: 写真選択 → AI解析 → 確認フォーム → リストに追加 or 登録 ==========
 with tab1:
-    st.markdown("#### 📷 撮影")
-    img_cam = st.camera_input("カメラで撮影", key="cam")
-    img_file = st.file_uploader("または写真をアップロード", type=["jpg", "png", "jpeg", "heic"], key="up")
-    target_img = img_cam if img_cam else img_file
+    img_file = st.file_uploader("📸 撮影 または 写真を選択", type=["jpg", "png", "jpeg", "heic"], key="up")
+    target_img = img_file
 
     if target_img:
         st.session_state.captured_image_bytes = target_img.getvalue()
@@ -297,7 +294,7 @@ JSON形式で1件のみ出力（配列にせずオブジェクト1つのみ）:
                 except Exception as e:
                     st.error(f"エラー: {e}")
     else:
-        st.caption("上で撮影するか、写真をアップロードしてください。")
+        pass  # ファーストビュー: タイトル＋アップロードのみ
 
     # 削除Undo（カートが空でも表示）
     if st.session_state.get("last_deleted_item") is not None:
@@ -400,35 +397,35 @@ with tab2:
             with st.expander("🔧 編集・削除", expanded=False):
                 cat_idx = next((i for i, c in enumerate(CATEGORIES) if c == (r.get("category") or "")), 0)
                 status_idx = next((i for i, s in enumerate(STATUSES) if s == (r.get("status") or "稼働可")), 0)
-                edit_item = st.text_input("品名", value=r.get("item") or "", key=f"edit_item_{sid}")
-                edit_qty = st.text_input("数量", value=r.get("qty") or "1", key=f"edit_qty_{sid}")
-                edit_category = st.selectbox("カテゴリ", CATEGORIES, index=cat_idx, key=f"edit_cat_{sid}")
-                edit_memo = st.text_area("備考", value=r.get("memo") or "", key=f"edit_memo_{sid}")
-                edit_spec = st.text_input("スペック", value=r.get("spec") or "", key=f"edit_spec_{sid}")
-                edit_status = st.selectbox("状態", STATUSES, index=status_idx, key=f"edit_status_{sid}")
+                edit_item = st.text_input("品名", value=r.get("item") or "", key=f"tab2_name_input_{sid}")
+                edit_qty = st.text_input("数量", value=r.get("qty") or "1", key=f"tab2_qty_input_{sid}")
+                edit_category = st.selectbox("カテゴリ", CATEGORIES, index=cat_idx, key=f"tab2_category_select_{sid}")
+                edit_memo = st.text_area("備考", value=r.get("memo") or "", key=f"tab2_memo_input_{sid}")
+                edit_spec = st.text_input("スペック", value=r.get("spec") or "", key=f"tab2_spec_input_{sid}")
+                edit_status = st.selectbox("状態", STATUSES, index=status_idx, key=f"tab2_status_select_{sid}")
                 edit_date_str = r.get("maintenance_date") or ""
                 edit_date_val = _parse_date(edit_date_str) or date.today()
-                edit_maintenance_date = st.date_input("点検日／賞味期限", value=edit_date_val, key=f"edit_date_{sid}")
+                edit_maintenance_date = st.date_input("点検日／賞味期限", value=edit_date_val, key=f"tab2_date_input_{sid}")
 
-                c1, c2 = st.columns(2)
-                with c1:
-                    if st.button("更新", key=f"btn_update_{sid}", use_container_width=True):
-                        db.update_stock(
-                            sid,
-                            item=edit_item,
-                            qty=edit_qty,
-                            category=edit_category,
-                            memo=edit_memo,
-                            status=edit_status,
-                            spec=edit_spec,
-                            maintenance_date=edit_maintenance_date.strftime("%Y-%m-%d"),
-                        )
-                        st.success("更新しました。")
-                        st.rerun()
-                with c2:
-                    if st.button("🗑️ 削除", type="secondary", use_container_width=True, key=f"btn_del_{sid}"):
+                if st.button("修正・保存", key=f"tab2_update_btn_{sid}", use_container_width=True, type="primary"):
+                    db.update_stock(
+                        sid,
+                        item=edit_item,
+                        qty=edit_qty,
+                        category=edit_category,
+                        memo=edit_memo,
+                        status=edit_status,
+                        spec=edit_spec,
+                        maintenance_date=edit_maintenance_date.strftime("%Y-%m-%d"),
+                    )
+                    st.success("更新しました。")
+                    st.rerun()
+
+                del_confirm = st.checkbox("削除する場合はチェックしてください", key=f"tab2_del_confirm_{sid}")
+                if del_confirm:
+                    if st.button("🗑️ 削除", type="secondary", use_container_width=True, key=f"tab2_del_btn_{sid}"):
                         db.delete_stock(sid)
-                        st.success("削除しました。")
+                        st.error("削除しました。")
                         st.rerun()
 
 # ========== タブ3: エクスポート ==========
