@@ -7,6 +7,7 @@ import re
 import html
 import csv
 import io
+import uuid
 from datetime import datetime, date, timedelta
 
 import streamlit as st
@@ -50,9 +51,10 @@ except Exception as e:
 
 db.init_db()
 
-# --- モバイルファースト用CSS（維持） ---
+# --- モバイルファースト用CSS（維持＋タイトルレスポンシブ） ---
 st.markdown("""
 <style>
+h1 { font-size: clamp(1.5rem, 5vw, 3rem) !important; white-space: normal !important; word-wrap: break-word !important; }
 .block-container { padding-top: 0.5rem !important; padding-bottom: 0.5rem !important; padding-left: 0.75rem !important; padding-right: 0.75rem !important; max-width: 100% !important; }
 .stTabs [data-baseweb="tab-list"] { gap: 0.25rem !important; }
 .stTabs [data-baseweb="tab"] { padding: 0.5rem 0.75rem !important; font-size: 1rem !important; }
@@ -66,6 +68,8 @@ st.markdown("""
 .expiry-warn { color: #c62828 !important; font-weight: bold !important; }
 .expiry-ok { color: #2e7d32 !important; }
 .status-badge { font-weight: bold; padding: 0.2rem 0.5rem; border-radius: 6px; }
+/* 編集・削除エクスパンダー内の2列目（削除ボタン）を赤くする */
+[data-testid="stExpander"] [data-testid="column"]:last-child .stButton button { background-color: #c62828 !important; color: white !important; border-color: #c62828 !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -80,6 +84,57 @@ def _parse_date(s: str) -> date | None:
         return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
     except (ValueError, TypeError):
         return None
+
+
+def _try_add_qty(a: str, b: str) -> str | None:
+    """数量を数値として加算。両方パースできれば合計の文字列、否则 None。"""
+    try:
+        an = int(re.sub(r"[^0-9]", "", str(a)) or "0")
+        bn = int(re.sub(r"[^0-9]", "", str(b)) or "0")
+        return str(an + bn)
+    except (ValueError, TypeError):
+        return None
+
+
+def _date_plus_years(d: date, years: int) -> date:
+    """日付に年を加算（2/29は翌年がない場合は2/28に）。"""
+    try:
+        return date(d.year + years, d.month, d.day)
+    except ValueError:
+        return date(d.year + years, 2, 28)
+
+
+def _pending_merge_key(p: dict) -> tuple:
+    """カート合算用キー: (normalized name, due_type, due_date)。"""
+    return (
+        db.normalize_name(p.get("name") or p.get("item") or ""),
+        (p.get("due_type") or "賞味期限").strip() or "賞味期限",
+        (p.get("due_date") or "").strip(),
+    )
+
+
+def _cart_add_or_merge(pending_items: list, new_item: dict) -> list:
+    """name + due_type + due_date が一致すれば数量加算、否则は末尾に追加。"""
+    key = _pending_merge_key(new_item)
+    name_norm = db.normalize_name(new_item.get("name") or new_item.get("item") or "")
+    if not name_norm:
+        return pending_items
+    out = []
+    merged = False
+    for p in pending_items:
+        pk = _pending_merge_key(p)
+        if pk == key:
+            qty_new = _try_add_qty(p.get("qty", "0"), new_item.get("qty", "1"))
+            if qty_new is not None:
+                out.append({**p, "qty": qty_new})
+                merged = True
+            else:
+                out.append(p)
+        else:
+            out.append(p)
+    if not merged:
+        out.append(new_item)
+    return out
 
 
 def _parse_expiry_from_memo(memo: str) -> tuple[str | None, bool]:
@@ -98,18 +153,22 @@ def _parse_expiry_from_memo(memo: str) -> tuple[str | None, bool]:
         return None, False
 
 
-# セッション: 解析結果を保持し、フォームの初期値にする
+# セッション: 解析結果・未登録カート（Pending: id, name, qty, due_type, due_date, memo, category, status, spec）
 if "captured_image_bytes" not in st.session_state:
     st.session_state.captured_image_bytes = None
 if "parsed_item" not in st.session_state:
-    st.session_state.parsed_item = None  # 1件分の辞書（確認フォーム用）
+    st.session_state.parsed_item = None
+if "pending_items" not in st.session_state:
+    st.session_state.pending_items = []
+if "last_deleted_item" not in st.session_state:
+    st.session_state.last_deleted_item = None
 
-st.title("⛑️ 香川防災DX")
+st.markdown("# ⛑️ 香川防災DX")
 st.caption("備蓄品管理")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📸 撮影", "📋 在庫一覧", "📥 エクスポート", "🗃️ データ管理"])
 
-# ========== タブ1: 撮影 → AI解析 → 確認・登録フォーム ==========
+# ========== タブ1: 撮影 → AI解析 → 確認フォーム → リストに追加 or 登録（連続スキャン・カート） ==========
 with tab1:
     st.markdown("#### 📷 撮影")
     img_cam = st.camera_input("カメラで撮影", key="cam")
@@ -119,11 +178,15 @@ with tab1:
     if target_img:
         st.session_state.captured_image_bytes = target_img.getvalue()
 
-    # 解析結果が1件ある場合: 確認・登録フォームを表示（撮影即保存はしない）
     parsed = st.session_state.get("parsed_item")
+    pending_items = st.session_state.get("pending_items") or []
+
     if parsed is not None:
-        st.markdown("##### 内容を確認して登録")
-        # 初期値はAI結果。ユーザーが編集可能
+        # 日付ワンタップ用: session_state で日付を保持（callback で更新するため）
+        if "form_date" not in st.session_state:
+            st.session_state.form_date = _parse_date(parsed.get("maintenance_date") or "") or date.today()
+
+        st.markdown("##### 内容を確認してから「リストに追加」または登録")
         default_cat = parsed.get("category") or ""
         cat_index = next((i for i, c in enumerate(CATEGORIES) if c == default_cat), 0)
         form_item = st.text_input("品名", value=parsed.get("item", ""), key="form_item")
@@ -132,31 +195,68 @@ with tab1:
         form_memo = st.text_area("備考", value=parsed.get("memo", ""), key="form_memo")
         form_spec = st.text_input("スペック（W数・電圧など）", value=parsed.get("spec", ""), key="form_spec", placeholder="例: 定格1600W")
         form_status = st.selectbox("状態", STATUSES, index=STATUSES.index(parsed.get("status") or "稼働可") if (parsed.get("status") or "稼働可") in STATUSES else 0, key="form_status")
-        maint_str = parsed.get("maintenance_date") or ""
-        form_date_val = _parse_date(maint_str) or date.today()
-        form_maintenance_date = st.date_input("点検日／賞味期限", value=form_date_val, key="form_date")
+        due_type = "点検日" if form_category == "資機材・重要設備" else "賞味期限"
+
+        # 日付: session_state と連動（ワンタップボタンで callback が form_date を更新）
+        form_maintenance_date = st.date_input("点検日／賞味期限", value=st.session_state.form_date, key="form_date")
+        # ワンタップ [+1年][+3年][+5年]（on_click 内で st.session_state.form_date を直接更新）
+        def make_add_years(years: int):
+            def _add():
+                d = st.session_state.get("form_date") or date.today()
+                st.session_state.form_date = _date_plus_years(d, years)
+            return _add
+
+        bt1, bt2, bt3 = st.columns(3)
+        with bt1:
+            st.button("+1年", key="btn_y1", on_click=make_add_years(1), use_container_width=True)
+        with bt2:
+            st.button("+3年", key="btn_y3", on_click=make_add_years(3), use_container_width=True)
+        with bt3:
+            st.button("+5年", key="btn_y5", on_click=make_add_years(5), use_container_width=True)
 
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("✅ 登録する", type="primary", use_container_width=True, key="btn_register"):
+            if st.button("📋 リストに追加（一時保存）", type="primary", use_container_width=True, key="btn_add_to_cart"):
+                one = {
+                    "id": str(uuid.uuid4())[:8],
+                    "name": form_item.strip(),
+                    "qty": form_qty.strip() or "1",
+                    "due_type": due_type,
+                    "due_date": form_maintenance_date.strftime("%Y-%m-%d"),
+                    "memo": form_memo.strip(),
+                    "category": form_category,
+                    "status": form_status,
+                    "spec": form_spec.strip(),
+                }
+                st.session_state.pending_items = _cart_add_or_merge(pending_items, one)
+                st.session_state.parsed_item = None
+                if "form_date" in st.session_state:
+                    del st.session_state.form_date
+                st.toast("カートに追加しました。次の撮影へ。")
+                st.rerun()
+        with col2:
+            if st.button("✅ この1件だけ登録する", use_container_width=True, key="btn_register_one"):
                 db.insert_stock(
-                    item=form_item,
+                    item=db.normalize_name(form_item) or form_item,
                     qty=form_qty,
                     category=form_category,
                     memo=form_memo,
                     status=form_status,
                     spec=form_spec,
                     maintenance_date=form_maintenance_date.strftime("%Y-%m-%d"),
+                    due_type=due_type,
                 )
                 st.session_state.parsed_item = None
                 st.session_state.captured_image_bytes = None
                 st.success("登録しました。")
                 st.rerun()
-        with col2:
-            if st.button("🔄 やり直す", use_container_width=True, key="btn_cancel"):
-                st.session_state.parsed_item = None
-                st.session_state.captured_image_bytes = None
-                st.rerun()
+        if st.button("🔄 やり直す", use_container_width=True, key="btn_cancel"):
+            st.session_state.parsed_item = None
+            st.session_state.captured_image_bytes = None
+            if "form_date" in st.session_state:
+                del st.session_state.form_date
+            st.rerun()
+
     elif st.session_state.captured_image_bytes:
         image = Image.open(io.BytesIO(st.session_state.captured_image_bytes))
         st.image(image, use_container_width=True)
@@ -174,24 +274,23 @@ with tab1:
                 try:
                     prompt = """
 この画像を分析し、防災備蓄として写っているものを1つ抽出してください。
-資機材・設備の場合は点検票・銘板から「最終点検日」「スペック（W数・電圧など）」を、
-食料の場合は「賞味期限」を読み取ってください。
+画像内に同じものが複数ある場合（ダンボールの山・複数棚など）、可能な限り総数を推定して qty に入れてください。
+資機材の場合は点検票・銘板から「最終点検日」「スペック（W数・電圧など）」を、食料の場合は「賞味期限」を読み取ってください。
 破損・燃料不足などが分かれば状態を推奨してください。
 
 JSON形式で1件のみ出力（配列にせずオブジェクト1つのみ）:
-{"item": "品名", "qty": "数量", "category": "カテゴリ（主食類/副食等/水・飲料/乳幼児用品/衛生・トイレ/寝具・避難環境/資機材・重要設備のいずれか）", "memo": "備考", "maintenance_date": "YYYY-MM-DD（点検日または賞味期限）", "spec": "スペック", "status": "稼働可 or 修理中 or 要点検 or 期限切れ or 貸出中 or その他"}
+{"item": "品名", "qty": "数量（複数ある場合は推定総数）", "category": "カテゴリ（主食類/副食等/水・飲料/乳幼児用品/衛生・トイレ/寝具・避難環境/資機材・重要設備のいずれか）", "memo": "備考", "maintenance_date": "YYYY-MM-DD", "spec": "スペック", "status": "稼働可 or 修理中 or 要点検 or 期限切れ or 貸出中 or その他"}
 """
                     response = model.generate_content([prompt, image])
                     raw_text = response.text.replace("```json", "").replace("```", "").strip()
                     data = json.loads(raw_text)
                     if isinstance(data, list):
                         data = data[0] if data else {}
-                    # カテゴリを7つに寄せる
                     cat = (data.get("category") or "").strip()
                     if cat not in CATEGORIES:
                         data["category"] = "副食等"
                     st.session_state.parsed_item = data
-                    st.success("解析しました。下記で内容を確認して登録してください。")
+                    st.success("解析しました。内容を確認して「リストに追加」または登録してください。")
                     st.rerun()
                 except json.JSONDecodeError:
                     st.error("読み取れませんでした。もう一度試してください。")
@@ -199,6 +298,62 @@ JSON形式で1件のみ出力（配列にせずオブジェクト1つのみ）:
                     st.error(f"エラー: {e}")
     else:
         st.caption("上で撮影するか、写真をアップロードしてください。")
+
+    # 削除Undo（カートが空でも表示）
+    if st.session_state.get("last_deleted_item") is not None:
+        if st.button("↩️ 元に戻す", type="secondary", use_container_width=True, key="btn_undo"):
+            st.session_state.pending_items = (st.session_state.pending_items or []) + [st.session_state.last_deleted_item]
+            st.session_state.last_deleted_item = None
+            st.toast("カートに戻しました。")
+            st.rerun()
+
+    # 未登録リスト（カート）: 最新1件を展開、要約ヘッダー
+    if pending_items:
+        st.markdown("---")
+        st.markdown("#### 📋 未登録リスト（現在のカート）")
+
+        # 最新が上（逆順）、先頭のみ expanded=True
+        for idx, p in enumerate(reversed(pending_items)):
+            name = p.get("name") or p.get("item") or ""
+            qty = p.get("qty") or "1"
+            due_type = p.get("due_type") or "賞味期限"
+            due_date = (p.get("due_date") or "").strip()
+            due_short = due_date[:7].replace("-", "/") if len(due_date) >= 7 else due_date
+            header = f"【{name}】 {qty} ({due_type}: {due_short})"
+            is_newest = idx == 0
+            with st.expander(header, expanded=is_newest):
+                st.caption(f"カテゴリ: {p.get('category', '')}　備考: {p.get('memo', '') or '－'}")
+                if st.button("カートから削除", key=f"cart_del_{p.get('id', idx)}", type="secondary"):
+                    st.session_state.last_deleted_item = p
+                    st.session_state.pending_items = [x for x in pending_items if x.get("id") != p.get("id")]
+                    st.toast("削除しました。「元に戻す」で復元できます。")
+                    st.rerun()
+
+        if st.button("✅ 全件まとめてDB登録", type="primary", use_container_width=True, key="btn_bulk_register"):
+            payload = []
+            for p in pending_items:
+                name = (p.get("name") or p.get("item") or "").strip()
+                if not name:
+                    continue
+                payload.append({
+                    "name": name,
+                    "qty": (p.get("qty") or "1").strip(),
+                    "due_type": (p.get("due_type") or "賞味期限").strip() or "賞味期限",
+                    "due_date": (p.get("due_date") or "").strip(),
+                    "memo": (p.get("memo") or "").strip(),
+                    "category": (p.get("category") or "").strip(),
+                    "status": (p.get("status") or "稼働可").strip(),
+                    "spec": (p.get("spec") or "").strip(),
+                })
+            logs, ok = db.bulk_register_with_merge(payload)
+            if ok:
+                st.session_state.pending_items = []
+                st.session_state.last_deleted_item = None
+                for msg in logs:
+                    st.success(msg)
+                st.rerun()
+            else:
+                st.error("登録中にエラーが発生しました。データは反映されていません。")
 
 # ========== タブ2: 在庫一覧（カテゴリ別: 資機材は点検日・ステータスを目立たせる） ==========
 with tab2:
@@ -208,6 +363,7 @@ with tab2:
         st.info("まだデータがありません。撮影タブで写真を撮って登録してください。")
     else:
         for r in rows:
+            sid = r.get("id")
             is_asset = (r.get("category") or "") == "資機材・重要設備"
             status = r.get("status") or "稼働可"
             is_warn_status = status not in ("稼働可", "")
@@ -240,6 +396,40 @@ with tab2:
                 + '</div>',
                 unsafe_allow_html=True,
             )
+
+            with st.expander("🔧 編集・削除", expanded=False):
+                cat_idx = next((i for i, c in enumerate(CATEGORIES) if c == (r.get("category") or "")), 0)
+                status_idx = next((i for i, s in enumerate(STATUSES) if s == (r.get("status") or "稼働可")), 0)
+                edit_item = st.text_input("品名", value=r.get("item") or "", key=f"edit_item_{sid}")
+                edit_qty = st.text_input("数量", value=r.get("qty") or "1", key=f"edit_qty_{sid}")
+                edit_category = st.selectbox("カテゴリ", CATEGORIES, index=cat_idx, key=f"edit_cat_{sid}")
+                edit_memo = st.text_area("備考", value=r.get("memo") or "", key=f"edit_memo_{sid}")
+                edit_spec = st.text_input("スペック", value=r.get("spec") or "", key=f"edit_spec_{sid}")
+                edit_status = st.selectbox("状態", STATUSES, index=status_idx, key=f"edit_status_{sid}")
+                edit_date_str = r.get("maintenance_date") or ""
+                edit_date_val = _parse_date(edit_date_str) or date.today()
+                edit_maintenance_date = st.date_input("点検日／賞味期限", value=edit_date_val, key=f"edit_date_{sid}")
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("更新", key=f"btn_update_{sid}", use_container_width=True):
+                        db.update_stock(
+                            sid,
+                            item=edit_item,
+                            qty=edit_qty,
+                            category=edit_category,
+                            memo=edit_memo,
+                            status=edit_status,
+                            spec=edit_spec,
+                            maintenance_date=edit_maintenance_date.strftime("%Y-%m-%d"),
+                        )
+                        st.success("更新しました。")
+                        st.rerun()
+                with c2:
+                    if st.button("🗑️ 削除", type="secondary", use_container_width=True, key=f"btn_del_{sid}"):
+                        db.delete_stock(sid)
+                        st.success("削除しました。")
+                        st.rerun()
 
 # ========== タブ3: エクスポート ==========
 with tab3:
