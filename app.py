@@ -34,7 +34,7 @@ st.set_page_config(
 )
 
 # ==========================================
-# 🎨 デザイン刷新（スマホ横並び強制対応）
+# 🎨 デザインCSS
 # ==========================================
 st.markdown("""
 <style>
@@ -51,10 +51,10 @@ h1 {
     margin-bottom: 0.5rem !important;
 }
 
-/* --- グリッドレイアウト（スマホでも横並びにする） --- */
+/* スマホ用グリッドレイアウト */
 .kpi-grid-container {
     display: grid;
-    grid-template-columns: repeat(2, 1fr); /* 強制2列 */
+    grid-template-columns: repeat(2, 1fr);
     gap: 10px;
     margin-bottom: 15px;
 }
@@ -68,14 +68,15 @@ h1 {
     flex-direction: column;
     justify-content: center;
     align-items: center;
-    height: 100px; /* 高さ固定で揃える */
+    height: 110px;
+    border: 1px solid #eee;
 }
 .kpi-icon { font-size: 1.8rem; margin-bottom: 5px; }
 .kpi-label { font-size: 0.75rem; color: #888; font-weight: bold; }
-.kpi-value { font-size: 1.3rem; font-weight: bold; color: #333; }
+.kpi-value { font-size: 1.2rem; font-weight: bold; color: #333; }
 .kpi-unit { font-size: 0.8rem; color: #aaa; margin-left: 2px; }
 
-/* カードデザイン */
+/* 在庫カード */
 .stock-card {
     background-color: #ffffff;
     border-radius: 12px;
@@ -129,13 +130,13 @@ with col_h2:
     st.markdown("""
     <div style="padding-top: 5px;">
         <h1 style="text-align: left; margin:0; font-size:1.5rem;">香川防災DX</h1>
-        <p style="color: #666; font-size: 0.8rem; margin:0;">備蓄品在庫管理システム v3.1</p>
+        <p style="color: #666; font-size: 0.8rem; margin:0;">備蓄品在庫管理システム v3.2</p>
     </div>
     """, unsafe_allow_html=True)
 
 tab1, tab2, tab3, tab4 = st.tabs(["📊 サマリー", "📸 登録", "📋 在庫", "⚙️ 設定"])
 
-# ========== 1. ダッシュボード（スマホグリッド対応） ==========
+# ========== 1. ダッシュボード ==========
 with tab1:
     stocks = db.get_all_stocks()
     if not stocks:
@@ -158,7 +159,6 @@ with tab1:
     items_red = []
     items_yellow = []
 
-    # アラート期間（デフォルト）
     alert_months = 6
 
     for s in stocks:
@@ -183,10 +183,8 @@ with tab1:
                 cnt_yellow += 1
                 items_yellow.append(item_info)
 
-    # --- HTMLで強制グリッド表示 ---
-    # Pythonのf-stringでHTMLを組み立てる
-    
-    def render_kpi_card(icon, label, value, unit, color="#333"):
+    # --- HTML生成関数 ---
+    def make_card(icon, label, value, unit, color="#333"):
         return f"""
         <div class="kpi-card">
             <div class="kpi-icon">{icon}</div>
@@ -197,24 +195,30 @@ with tab1:
 
     st.markdown("### 📦 備蓄状況")
     
-    # 3つ並び（登録数、水、食料） ※2列グリッドに入れると3つ目は2行目に行く
-    st.markdown(f"""
+    # HTMLを作成してから表示（エラー防止）
+    html_main = f"""
     <div class="kpi-grid-container">
-        {render_kpi_card("📊", "登録アイテム", cnt_total, "件")}
-        {render_kpi_card("💧", "水・飲料", water_qty, "L", "#007bff")}
-        {render_kpi_card("🍱", "食料", food_qty, "食", "#ff9800")}
+        {make_card("📊", "登録アイテム", cnt_total, "件")}
+        {make_card("💧", "水・飲料", water_qty, "L", "#007bff")}
+        {make_card("🍱", "食料", food_qty, "食", "#ff9800")}
+        <div class="kpi-card" style="background:#f9f9f9;">
+            <div style="font-size:0.8rem; color:#aaa;">その他</div>
+            <div style="font-weight:bold;">{cnt_total}</div>
+        </div>
     </div>
-    """, unsafe_allow_html=True)
+    """
+    st.markdown(html_main, unsafe_allow_html=True)
     
     st.markdown("### 🏥 生活・資機材")
-    st.markdown(f"""
+    html_sub = f"""
     <div class="kpi-grid-container">
-        {render_kpi_card("🚽", "トイレ・衛生", toilet_qty, "回")}
-        {render_kpi_card("👶", "乳幼児用品", baby_qty, "点")}
-        {render_kpi_card("🛏️", "寝具・毛布", sleep_qty, "枚")}
-        {render_kpi_card("🔋", "資機材", tools_qty, "台")}
+        {make_card("🚽", "トイレ・衛生", toilet_qty, "回")}
+        {make_card("👶", "乳幼児用品", baby_qty, "点")}
+        {make_card("🛏️", "寝具・毛布", sleep_qty, "枚")}
+        {make_card("🔋", "資機材", tools_qty, "台")}
     </div>
-    """, unsafe_allow_html=True)
+    """
+    st.markdown(html_sub, unsafe_allow_html=True)
 
     # --- アラート ---
     if cnt_red > 0:
@@ -328,11 +332,10 @@ with tab3:
                     db.delete_stock(stock_id)
                     st.rerun()
 
-# ========== 4. 設定（危険なボタンは隠す） ==========
+# ========== 4. 設定 ==========
 with tab4:
     st.markdown("#### ⚙️ データ管理")
     
-    # CSVエクスポート（安全なので上）
     rows = db.get_all_stocks()
     if rows:
         df = pd.DataFrame(rows)
@@ -341,11 +344,8 @@ with tab4:
 
     st.markdown("---")
     
-    # 危険エリア：安全ロック付き
     with st.expander("⚠️ 初期化メニュー（管理者用）"):
         st.warning("登録データを全て削除します。")
-        
-        # チェックボックスによる安全ロック
         agree = st.checkbox("データを完全に削除することを理解しました")
         
         if agree:
@@ -361,4 +361,4 @@ with tab4:
                 except Exception as e:
                     st.error(f"エラー: {e}")
         else:
-            st.button("💥 全データを削除実行", disabled=True, help="上のチェックボックスを入れてください")
+            st.button("💥 全データを削除実行", disabled=True)
