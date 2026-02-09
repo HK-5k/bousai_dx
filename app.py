@@ -228,7 +228,7 @@ with tab_camera:
         form_memo = st.text_area("備考", value=parsed.get("memo", ""), key="form_memo")
         form_spec = st.text_input("スペック（W数・電圧など）", value=parsed.get("spec", ""), key="form_spec", placeholder="例: 定格1600W")
         form_status = st.selectbox("状態", STATUSES, index=STATUSES.index(parsed.get("status") or "稼働可") if (parsed.get("status") or "稼働可") in STATUSES else 0, key="form_status")
-        due_type = "点検日" if form_category == "資機材・重要設備" else "賞味期限"
+        due_type = "点検日" if form_category == "7. 資機材・重要設備" else "賞味期限"
 
         # 日付: session_state と連動（ワンタップボタンで callback が form_date を更新）
         form_maintenance_date = st.date_input("点検日／賞味期限", value=st.session_state.form_date, key="form_date")
@@ -312,7 +312,7 @@ with tab_camera:
 破損・燃料不足などが分かれば状態を推奨してください。
 
 JSON形式で1件のみ出力（配列にせずオブジェクト1つのみ）:
-{"item": "品名", "qty": "数量（複数ある場合は推定総数）", "category": "カテゴリ（主食類/副食等/水・飲料/乳幼児用品/衛生・トイレ/寝具・避難環境/資機材・重要設備のいずれか）", "memo": "備考", "maintenance_date": "YYYY-MM-DD", "spec": "スペック", "status": "稼働可 or 修理中 or 要点検 or 期限切れ or 貸出中 or その他"}
+{"item": "品名", "qty": "数量（複数ある場合は推定総数）", "category": "カテゴリ（必ず次の7つのいずれか1つだけ: 1. 主食類 / 2. 副食等 / 3. 水・飲料 / 4. 乳幼児用品 / 5. 衛生・トイレ / 6. 寝具・避難環境 / 7. 資機材・重要設備）", "memo": "備考", "maintenance_date": "YYYY-MM-DD", "spec": "スペック", "status": "稼働可 or 修理中 or 要点検 or 期限切れ or 貸出中 or その他"}
 """
                     response = model.generate_content([prompt, image])
                     raw_text = response.text.replace("```json", "").replace("```", "").strip()
@@ -321,7 +321,7 @@ JSON形式で1件のみ出力（配列にせずオブジェクト1つのみ）:
                         data = data[0] if data else {}
                     cat = (data.get("category") or "").strip()
                     if cat not in CATEGORIES:
-                        data["category"] = "副食等"
+                        data["category"] = "2. 副食等"
                     st.session_state.parsed_item = data
                     st.success("解析しました。内容を確認して「リストに追加」または登録してください。")
                     st.rerun()
@@ -397,7 +397,7 @@ with tab_list:
     else:
         for r in rows:
             sid = r.get("id")
-            is_asset = (r.get("category") or "") == "資機材・重要設備"
+            is_asset = (r.get("category") or "") == "7. 資機材・重要設備"
             status = r.get("status") or "稼働可"
             is_warn_status = status not in ("稼働可", "")
 
