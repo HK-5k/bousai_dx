@@ -1,0 +1,9 @@
+[server]
+# スマホなど他デバイスから接続するため全インターフェースでリッスン
+address = "0.0.0.0"
+port = 8501
+# スマホからのアクセスでXSRFエラーになる場合の対策
+enableXsrfProtection = false
+enableCORS = false
+# FSEvents がエラーになる環境では poll にするとホットリロードが動く
+fileWatcherType = "poll"
