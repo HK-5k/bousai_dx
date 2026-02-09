@@ -54,7 +54,7 @@ db.init_db()
 # --- iPhone向けCSS（タイトル見切れ防止・上部余白） ---
 st.markdown("""
 <style>
-h1 { font-size: 1.8rem !important; white-space: normal !important; word-wrap: break-word !important; }
+h1 { font-size: clamp(1.5rem, 6vw, 2.2rem) !important; white-space: normal !important; word-wrap: break-word !important; line-height: 1.2 !important; }
 .block-container { padding-top: 1.25rem !important; padding-bottom: 0.5rem !important; padding-left: 0.75rem !important; padding-right: 0.75rem !important; max-width: 100% !important; }
 .stTabs [data-baseweb="tab-list"] { gap: 0.25rem !important; }
 .stTabs [data-baseweb="tab"] { padding: 0.5rem 0.75rem !important; font-size: 1rem !important; }
@@ -163,12 +163,48 @@ if "pending_items" not in st.session_state:
 if "last_deleted_item" not in st.session_state:
     st.session_state.last_deleted_item = None
 
-st.markdown("# ⛑️ 香川防災DX")
+st.markdown("""
+<h1 style='text-align: center; font-size: clamp(1.5rem, 6vw, 2.2rem); margin-bottom: 1rem; white-space: normal; word-wrap: break-word; line-height: 1.2;'>
+    ⛑️ 香川防災DX<br><span style='font-size: 0.8em; color: gray;'>備蓄管理システム</span>
+</h1>
+""", unsafe_allow_html=True)
 
-tab1, tab2, tab3, tab4 = st.tabs(["📸 撮影", "📋 在庫一覧", "📥 エクスポート", "🗃️ データ管理"])
+tab_summary, tab_camera, tab_list, tab_data = st.tabs(["📊 サマリー", "📸 撮影", "📋 在庫一覧", "💾 データ管理"])
 
-# ========== タブ1: 写真選択 → AI解析 → 確認フォーム → リストに追加 or 登録 ==========
-with tab1:
+# ========== タブ1: サマリー（備蓄状況・生存可能日数） ==========
+with tab_summary:
+    rows = db.get_all_stocks()
+    if not rows:
+        st.info("まだデータがありません。「📸 撮影」タブで写真を登録してください。")
+    else:
+        df = pd.DataFrame(rows)
+        total = len(df)
+        st.metric("登録品目数", f"{total} 品目")
+
+        if "category" in df.columns:
+            by_cat = df.groupby("category").size().sort_values(ascending=True)
+            if not by_cat.empty:
+                st.markdown("#### カテゴリ別内訳")
+                st.bar_chart(by_cat.rename("件数"))
+
+        # 生存可能日数の目安（水・主食・副食の有無から簡易表示）
+        has_water = has_food = False
+        if "category" in df.columns:
+            water = df[df["category"].astype(str).str.contains("水", na=False)]
+            food = df[df["category"].astype(str).str.contains("主食|副食", na=False, regex=True)]
+            has_water = len(water) > 0
+            has_food = len(food) > 0
+        if has_water and has_food:
+            st.metric("備蓄状況", "水・食料あり（生存可能日数は品目により異なります）")
+        elif has_water:
+            st.metric("備蓄状況", "水のみ登録（食料の登録を推奨）")
+        elif has_food:
+            st.metric("備蓄状況", "食料のみ登録（水の登録を推奨）")
+        else:
+            st.metric("備蓄状況", "水・食料を登録すると生存可能日数の目安を表示します")
+
+# ========== タブ2: 写真選択 → AI解析 → 確認フォーム → リストに追加 or 登録 ==========
+with tab_camera:
     img_file = st.file_uploader("📸 撮影 または 写真を選択", type=["jpg", "png", "jpeg", "heic"], key="up")
     target_img = img_file
 
@@ -352,8 +388,8 @@ JSON形式で1件のみ出力（配列にせずオブジェクト1つのみ）:
             else:
                 st.error("登録中にエラーが発生しました。データは反映されていません。")
 
-# ========== タブ2: 在庫一覧（カテゴリ別: 資機材は点検日・ステータスを目立たせる） ==========
-with tab2:
+# ========== タブ3: 在庫一覧（カテゴリ別: 資機材は点検日・ステータスを目立たせる） ==========
+with tab_list:
     st.markdown("#### 📋 登録済み在庫")
     rows = db.get_all_stocks()
     if not rows:
@@ -428,31 +464,29 @@ with tab2:
                         st.error("削除しました。")
                         st.rerun()
 
-# ========== タブ3: エクスポート ==========
-with tab3:
-    st.markdown("#### 📥 CSVダウンロード")
+# ========== タブ4: データ管理（CSVエクスポート・インポート統合） ==========
+with tab_data:
+    st.markdown("#### 💾 データ管理")
+
+    st.markdown("##### 📥 CSVエクスポート")
     rows = db.get_all_stocks()
     if rows:
         df = pd.DataFrame(rows)
-        cols = ["item", "qty", "category", "memo", "status", "spec", "maintenance_date", "created_at"]
-        cols = [c for c in cols if c in df.columns]
+        cols = [c for c in ["item", "qty", "category", "memo", "status", "spec", "maintenance_date", "created_at"] if c in df.columns]
         df_export = df[cols].copy()
         df_export.columns = ["品名", "数量", "カテゴリ", "備考", "状態", "仕様", "点検日/賞味期限", "登録日時"][:len(cols)]
-        csv_data = df_export.to_csv(index=False, encoding="utf-8-sig")
         st.download_button(
             label="📥 CSVをダウンロード",
-            data=csv_data,
+            data=df_export.to_csv(index=False, encoding="utf-8-sig"),
             file_name=f"bousai_stock_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
             mime="text/csv",
+            key="dl_export",
             use_container_width=True,
         )
     else:
         st.info("登録データがありません。")
 
-# ========== タブ4: データ管理（CSVインポート・エクスポート） ==========
-with tab4:
-    st.markdown("#### 🗃️ データ管理")
-    st.markdown("##### CSV一括インポート")
+    st.markdown("##### 📤 CSV一括インポート")
     uploaded = st.file_uploader("CSVファイルをアップロード", type=["csv"], key="bulk_csv")
     if uploaded is not None:
         raw = uploaded.read()
@@ -493,21 +527,3 @@ with tab4:
                     normalized.append(n)
             count = db.bulk_insert_from_rows(normalized)
             st.success(f"✅ {count}件のデータを登録しました。")
-
-    st.markdown("##### CSVエクスポート")
-    rows = db.get_all_stocks()
-    if rows:
-        df = pd.DataFrame(rows)
-        cols = [c for c in ["item", "qty", "category", "memo", "status", "spec", "maintenance_date", "created_at"] if c in df.columns]
-        df_exp = df[cols].copy()
-        df_exp.columns = ["品名", "数量", "カテゴリ", "備考", "状態", "仕様", "点検日/賞味期限", "登録日時"][:len(cols)]
-        st.download_button(
-            "📥 CSVをダウンロード",
-            data=df_exp.to_csv(index=False, encoding="utf-8-sig"),
-            file_name=f"bousai_stock_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-            mime="text/csv",
-            key="dl_manage",
-            use_container_width=True,
-        )
-    else:
-        st.info("登録データがありません。")
