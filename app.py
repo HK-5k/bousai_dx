@@ -34,13 +34,13 @@ st.set_page_config(
 )
 
 # ==========================================
-# 🎨 デザイン刷新（モダンUI・DX仕様）
+# 🎨 デザイン刷新（スマホ横並び強制対応）
 # ==========================================
 st.markdown("""
 <style>
 .stApp { background-color: #f4f6f9; }
 .block-container { 
-    padding-top: 2rem !important; 
+    padding-top: 1rem !important; 
     padding-bottom: 5rem !important; 
     max-width: 800px !important; 
 }
@@ -50,22 +50,37 @@ h1 {
     color: #2c3e50;
     margin-bottom: 0.5rem !important;
 }
-/* タブ */
-.stTabs [data-baseweb="tab-list"] {
-    background-color: #ffffff;
-    padding: 10px 10px 0 10px;
-    border-radius: 12px 12px 0 0;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+
+/* --- グリッドレイアウト（スマホでも横並びにする） --- */
+.kpi-grid-container {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr); /* 強制2列 */
+    gap: 10px;
+    margin-bottom: 15px;
 }
-.stTabs [data-baseweb="tab"] { height: 50px; font-weight: bold; color: #555; }
-.stTabs [aria-selected="true"] { color: #007bff !important; border-bottom-color: #007bff !important; }
+.kpi-card {
+    background: white;
+    padding: 10px;
+    border-radius: 10px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    height: 100px; /* 高さ固定で揃える */
+}
+.kpi-icon { font-size: 1.8rem; margin-bottom: 5px; }
+.kpi-label { font-size: 0.75rem; color: #888; font-weight: bold; }
+.kpi-value { font-size: 1.3rem; font-weight: bold; color: #333; }
+.kpi-unit { font-size: 0.8rem; color: #aaa; margin-left: 2px; }
 
 /* カードデザイン */
 .stock-card {
     background-color: #ffffff;
     border-radius: 12px;
-    padding: 16px;
-    margin-bottom: 16px;
+    padding: 12px;
+    margin-bottom: 12px;
     box-shadow: 0 4px 6px rgba(0,0,0,0.05);
     border-left: 5px solid #ccc;
 }
@@ -76,22 +91,13 @@ h1 {
 
 /* バッジ */
 .badge {
-    display: inline-block; padding: 2px 8px; border-radius: 4px;
-    font-size: 0.75rem; font-weight: bold; color: white; margin-bottom: 4px;
+    display: inline-block; padding: 2px 6px; border-radius: 4px;
+    font-size: 0.7rem; font-weight: bold; color: white; margin-bottom: 4px;
 }
 .badge-red { background-color: #ff4b4b; }
 .badge-yellow { background-color: #ffa726; color: #fff !important; }
 .badge-green { background-color: #00c853; }
 .badge-gray { background-color: #90a4ae; }
-
-/* KPIカード（小） */
-.kpi-small {
-    background: white; padding: 10px; border-radius: 8px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.1); text-align: center;
-    margin-bottom: 10px;
-}
-.kpi-label { font-size: 0.8rem; color: #666; }
-.kpi-val { font-size: 1.2rem; font-weight: bold; color: #333; }
 
 .stButton > button {
     border-radius: 8px !important; font-weight: bold !important;
@@ -121,30 +127,25 @@ def extract_date(text):
 col_h1, col_h2 = st.columns([1, 4])
 with col_h2:
     st.markdown("""
-    <div style="padding-top: 10px;">
-        <h1 style="text-align: left; margin:0;">香川防災DX</h1>
-        <p style="color: #666; font-size: 0.9rem; margin:0;">備蓄品在庫管理システム v3.0</p>
+    <div style="padding-top: 5px;">
+        <h1 style="text-align: left; margin:0; font-size:1.5rem;">香川防災DX</h1>
+        <p style="color: #666; font-size: 0.8rem; margin:0;">備蓄品在庫管理システム v3.1</p>
     </div>
     """, unsafe_allow_html=True)
 
-tab1, tab2, tab3, tab4 = st.tabs(["📊 ダッシュボード", "📸 登録・撮影", "📋 在庫リスト", "⚙️ 設定・データ"])
+tab1, tab2, tab3, tab4 = st.tabs(["📊 サマリー", "📸 登録", "📋 在庫", "⚙️ 設定"])
 
-# ========== 1. ダッシュボード（全カテゴリ対応） ==========
+# ========== 1. ダッシュボード（スマホグリッド対応） ==========
 with tab1:
     stocks = db.get_all_stocks()
     if not stocks:
-        st.info("ℹ️ データがありません。「📸 登録・撮影」タブから開始してください。")
+        st.info("ℹ️ データがありません。「📸 登録」タブから開始してください。")
         st.stop()
-
-    with st.expander("⚙️ アラート設定", expanded=False):
-        alert_months = st.slider("期限切れ警告（ヶ月前）", 1, 24, 6)
     
     today = datetime.now().date()
     
-    # --- 集計ロジック ---
+    # --- 集計 ---
     cnt_total = len(stocks)
-    
-    # カテゴリ別集計用変数
     water_qty = 0
     food_qty = 0
     toilet_qty = 0
@@ -157,8 +158,10 @@ with tab1:
     items_red = []
     items_yellow = []
 
+    # アラート期間（デフォルト）
+    alert_months = 6
+
     for s in stocks:
-        # カテゴリ判定（香川県基準）
         cat = str(s.get('category') or "")
         qty = float(s.get('qty') or 0)
         
@@ -169,7 +172,6 @@ with tab1:
         elif "寝具" in cat or "避難" in cat or "毛布" in cat: sleep_qty += qty
         elif "資機材" in cat or "設備" in cat or "電池" in cat: tools_qty += qty
 
-        # 期限チェック
         exp_date = extract_date(s.get('memo', ''))
         item_info = {"品名": s['item'], "数量": s['qty'], "期限": exp_date}
         
@@ -181,95 +183,67 @@ with tab1:
                 cnt_yellow += 1
                 items_yellow.append(item_info)
 
-    # --- KPIエリア（メイン：水・食料） ---
-    st.markdown("### 📦 備蓄概況")
-    kpi1, kpi2, kpi3 = st.columns(3)
+    # --- HTMLで強制グリッド表示 ---
+    # Pythonのf-stringでHTMLを組み立てる
     
-    def main_kpi(title, value, unit, color="#333", icon=""):
+    def render_kpi_card(icon, label, value, unit, color="#333"):
         return f"""
-        <div style="background:white; padding:15px; border-radius:10px; box-shadow:0 2px 4px rgba(0,0,0,0.05); text-align:center; height:100%;">
-            <div style="font-size:2rem;">{icon}</div>
-            <div style="font-size:0.8rem; color:#888; margin-top:5px;">{title}</div>
-            <div style="font-size:1.5rem; font-weight:bold; color:{color};">{int(value)}<span style="font-size:0.9rem; color:#aaa;">{unit}</span></div>
+        <div class="kpi-card">
+            <div class="kpi-icon">{icon}</div>
+            <div class="kpi-label">{label}</div>
+            <div class="kpi-value" style="color:{color}">{int(value)}<span class="kpi-unit">{unit}</span></div>
         </div>
         """
-    
-    with kpi1: st.markdown(main_kpi("登録総数", cnt_total, "件", icon="📊"), unsafe_allow_html=True)
-    with kpi2: st.markdown(main_kpi("水・飲料", water_qty, "L", "#007bff", icon="💧"), unsafe_allow_html=True)
-    with kpi3: st.markdown(main_kpi("食料", food_qty, "食", "#ff9800", icon="🍱"), unsafe_allow_html=True)
-    
-    st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
 
-    # --- KPIエリア（サブ：衛生・資機材・その他） ---
-    st.markdown("### 🏥 生活・衛生・資機材")
+    st.markdown("### 📦 備蓄状況")
     
-    # 2列グリッドで表示（スマホで見やすい）
-    sub_kpi_style = """
-    <div class="kpi-small">
-        <div style="font-size:1.5rem; margin-bottom:5px;">{}</div>
-        <div class="kpi-label">{}</div>
-        <div class="kpi-val">{} <span style="font-size:0.8rem; font-weight:normal;">{}</span></div>
+    # 3つ並び（登録数、水、食料） ※2列グリッドに入れると3つ目は2行目に行く
+    st.markdown(f"""
+    <div class="kpi-grid-container">
+        {render_kpi_card("📊", "登録アイテム", cnt_total, "件")}
+        {render_kpi_card("💧", "水・飲料", water_qty, "L", "#007bff")}
+        {render_kpi_card("🍱", "食料", food_qty, "食", "#ff9800")}
     </div>
-    """
+    """, unsafe_allow_html=True)
     
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown(sub_kpi_style.format("🚽", "トイレ・衛生", int(toilet_qty), "回/枚"), unsafe_allow_html=True)
-        st.markdown(sub_kpi_style.format("👶", "乳幼児用品", int(baby_qty), "点"), unsafe_allow_html=True)
-    with c2:
-        st.markdown(sub_kpi_style.format("🛏️", "寝具・避難", int(sleep_qty), "枚/台"), unsafe_allow_html=True)
-        st.markdown(sub_kpi_style.format("🔋", "資機材・電源", int(tools_qty), "台/個"), unsafe_allow_html=True)
+    st.markdown("### 🏥 生活・資機材")
+    st.markdown(f"""
+    <div class="kpi-grid-container">
+        {render_kpi_card("🚽", "トイレ・衛生", toilet_qty, "回")}
+        {render_kpi_card("👶", "乳幼児用品", baby_qty, "点")}
+        {render_kpi_card("🛏️", "寝具・毛布", sleep_qty, "枚")}
+        {render_kpi_card("🔋", "資機材", tools_qty, "台")}
+    </div>
+    """, unsafe_allow_html=True)
 
-    st.markdown("---")
-
-    # --- アクションリスト ---
+    # --- アラート ---
     if cnt_red > 0:
         st.markdown(f"""
-        <div style="background:#fff5f5; border-left:5px solid #ff4b4b; padding:15px; border-radius:4px; margin-bottom:15px;">
-            <h4 style="margin:0; color:#c62828;">⚠️ 緊急対応が必要 ({cnt_red}件)</h4>
-            <p style="margin:5px 0 0 0; font-size:0.9rem;">以下のアイテムは期限が切れています。廃棄または交換してください。</p>
+        <div style="background:#fff5f5; border-left:5px solid #ff4b4b; padding:10px; border-radius:4px; margin-top:10px; margin-bottom:10px;">
+            <strong style="color:#c62828;">⚠️ 期限切れ ({cnt_red}件)</strong>
         </div>
         """, unsafe_allow_html=True)
         st.dataframe(pd.DataFrame(items_red), hide_index=True, use_container_width=True)
     
-    if cnt_yellow > 0:
-        st.markdown(f"""
-        <div style="background:#fffdf5; border-left:5px solid #ffa726; padding:15px; border-radius:4px; margin-bottom:15px;">
-            <h4 style="margin:0; color:#ef6c00;">📅 交換準備 ({cnt_yellow}件)</h4>
-            <p style="margin:5px 0 0 0; font-size:0.9rem;">{alert_months}ヶ月以内に期限が切れます。</p>
-        </div>
-        """, unsafe_allow_html=True)
-        st.dataframe(pd.DataFrame(items_yellow), hide_index=True, use_container_width=True)
-
     if cnt_red == 0 and cnt_yellow == 0:
-        st.success("✅ 全てのアラートはクリアされています。健全な管理状態です。")
+        st.success("✅ アラートなし（健全）")
 
-# ========== 2. 登録・撮影 ==========
+# ========== 2. 登録 ==========
 with tab2:
-    st.markdown("#### 📷 新規アイテム登録")
-    st.markdown("写真をアップロードすると、AIが自動で品名・数量・期限を読み取ります。")
-    
-    uploaded_file = st.file_uploader("", type=["jpg", "png", "jpeg", "heic"])
+    st.markdown("#### 📷 新規登録")
+    uploaded_file = st.file_uploader("写真をアップロード", type=["jpg", "png", "jpeg", "heic"])
     
     if uploaded_file:
         image = Image.open(uploaded_file)
         st.image(image, caption="プレビュー", use_container_width=True)
         
-        if st.button("✨ AI解析を実行する", type="primary", use_container_width=True):
-            with st.spinner("AIが画像を分析中..."):
+        if st.button("✨ AI解析・登録", type="primary", use_container_width=True):
+            with st.spinner("解析中..."):
                 try:
                     prompt = """
-                    この画像を分析し、防災備蓄品データを抽出してください。
-                    JSON配列形式: [{"item": "品名", "qty": 数値, "unit": "単位", "category": "カテゴリ", "date": "YYYY-MM-DD", "memo": "詳細"}]
-                    【カテゴリ選択肢】
-                    - 1. 主食類
-                    - 2. 副食等
-                    - 3. 水・飲料
-                    - 4. 乳幼児用品 (ミルク, おむつ等)
-                    - 5. 衛生・トイレ (簡易トイレ, ペーパー, 生理用品等)
-                    - 6. 寝具・避難環境 (毛布, ベッド, パーテーション等)
-                    - 7. 資機材・重要設備 (発電機, 電池, 蓄電池等)
-                    ※賞味期限・使用期限(date)を全力で探してください。なければnull。
+                    画像を分析し、防災備蓄品データを抽出してください。
+                    JSON配列: [{"item": "品名", "qty": 数値, "unit": "単位", "category": "カテゴリ", "date": "YYYY-MM-DD", "memo": "詳細"}]
+                    カテゴリ: 1.主食類, 2.副食等, 3.水・飲料, 4.乳幼児用品, 5.衛生・トイレ, 6.寝具・避難環境, 7.資機材・重要設備
                     """
                     response = model.generate_content([prompt, image])
                     text = response.text.replace("```json", "").replace("```", "").strip()
@@ -289,29 +263,21 @@ with tab2:
                         )
                         count += 1
                     
-                    st.success(f"完了: {count} 件を登録しました")
-                    st.balloons()
+                    st.success(f"{count}件 登録完了！")
                 except Exception as e:
-                    st.error(f"解析エラー: {e}")
+                    st.error(f"エラー: {e}")
 
 # ========== 3. 在庫リスト ==========
 with tab3:
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        search_query = st.text_input("🔍 検索", placeholder="品名、カテゴリ、メモ...")
-    
+    search_query = st.text_input("🔍 検索", placeholder="品名...")
     rows = db.get_all_stocks()
     if search_query:
-        rows = [r for r in rows if search_query in str(r['item']) or search_query in str(r['memo']) or search_query in str(r['category'])]
+        rows = [r for r in rows if search_query in str(r['item']) or search_query in str(r['category'])]
     
-    if not rows:
-        st.info("表示するデータがありません。")
+    if not rows: st.info("データなし")
     
-    alert_months_list = 6 
     today = datetime.now().date()
     
-    st.markdown("---")
-
     for row in rows:
         stock_id = row['id']
         memo_str = str(row['memo'])
@@ -319,7 +285,7 @@ with tab3:
         
         status_class = "status-gray"
         badge_html = "<span class='badge badge-gray'>期限不明</span>"
-        date_msg = "記載なし"
+        date_msg = "-"
         
         if exp_date:
             days_left = (exp_date - today).days
@@ -327,7 +293,7 @@ with tab3:
             if days_left < 0:
                 status_class = "status-red"
                 badge_html = "<span class='badge badge-red'>期限切れ</span>"
-            elif days_left <= (alert_months_list * 30):
+            elif days_left <= 180:
                 status_class = "status-yellow"
                 badge_html = "<span class='badge badge-yellow'>交換推奨</span>"
             else:
@@ -336,80 +302,63 @@ with tab3:
 
         st.markdown(f"""
         <div class="stock-card {status_class}">
-            <div style="display:flex; justify-content:space-between; align-items:start;">
+            <div style="display:flex; justify-content:space-between;">
                 <div>
                     {badge_html}
-                    <div class="card-title">{row['item']}</div>
-                    <div class="card-meta">
-                        📦 数量: <b>{row['qty']}</b> <span style="color:#ddd;">|</span> 📂 {row['category']}
-                    </div>
+                    <div style="font-weight:bold; font-size:1rem;">{row['item']}</div>
+                    <div style="font-size:0.8rem; color:#666;">数量: <b>{row['qty']}</b> | {row['category']}</div>
                 </div>
-                <div style="text-align:right;">
-                    <div style="font-size:0.8rem; color:#888;">期限</div>
-                    <div style="font-weight:bold; color:#333;">{date_msg}</div>
+                <div style="text-align:right; font-size:0.8rem;">
+                    <div style="color:#888;">期限</div>
+                    <div style="font-weight:bold;">{date_msg}</div>
                 </div>
             </div>
-            <div class="card-memo">{html.escape(memo_str)}</div>
         </div>
         """, unsafe_allow_html=True)
         
-        with st.expander(f"🔧 操作 (ID: {stock_id})"):
-            new_qty = st.number_input("数量変更", value=int(row['qty'] or 0), key=f"qty_{stock_id}")
-            c_btn1, c_btn2 = st.columns(2)
-            with c_btn1:
-                if st.button("更新する", key=f"upd_{stock_id}"):
+        with st.expander(f"編集 ID:{stock_id}"):
+            new_qty = st.number_input("数量", value=int(row['qty'] or 0), key=f"qty_{stock_id}")
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("更新", key=f"upd_{stock_id}"):
                     db.update_stock(stock_id, qty=new_qty)
-                    st.success("更新しました")
                     st.rerun()
-            with c_btn2:
-                if st.button("削除する", key=f"del_{stock_id}", type="primary"):
+            with c2:
+                if st.button("削除", key=f"del_{stock_id}"):
                     db.delete_stock(stock_id)
                     st.rerun()
 
-# ========== 4. データ管理 ==========
+# ========== 4. 設定（危険なボタンは隠す） ==========
 with tab4:
-    st.markdown("#### 📥 📤 データの入出力")
+    st.markdown("#### ⚙️ データ管理")
     
-    st.markdown("##### ⚠️ システム管理")
-    with st.expander("初期化メニュー（取り扱い注意）"):
-        st.warning("この操作を行うと、登録された全ての備蓄データが消去されます。")
-        if st.button("💥 全データを完全消去してリセット", type="primary"):
-            try:
-                conn = sqlite3.connect('stock.db')
-                c = conn.cursor()
-                c.execute('DELETE FROM stocks')
-                conn.commit()
-                conn.close()
-                st.success("リセット完了しました。")
-                st.rerun()
-            except Exception as e:
-                st.error(f"エラー: {e}")
-
-    st.markdown("---")
-    
+    # CSVエクスポート（安全なので上）
     rows = db.get_all_stocks()
     if rows:
         df = pd.DataFrame(rows)
         csv = df.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("📥 CSVバックアップをダウンロード", data=csv, file_name="kagawa_dx_backup.csv", mime="text/csv", use_container_width=True)
+        st.download_button("📥 CSVダウンロード", data=csv, file_name="backup.csv", mime="text/csv", use_container_width=True)
+
+    st.markdown("---")
     
-    st.markdown("##### CSVから復元・一括登録")
-    up_csv = st.file_uploader("CSVファイルをドラッグ＆ドロップ", type=["csv"])
-    if up_csv:
-        if st.button("登録を実行", use_container_width=True):
-            try:
-                try: df_new = pd.read_csv(up_csv, encoding='shift-jis')
-                except: df_new = pd.read_csv(up_csv, encoding='utf-8')
-                
-                count = 0
-                for index, r in df_new.iterrows():
-                    db.insert_stock(
-                        item=str(r.get('item', r.get('品名', '不明'))),
-                        qty=int(r.get('qty', r.get('数量', 0))),
-                        category=str(r.get('category', r.get('カテゴリ', 'その他'))),
-                        memo=str(r.get('memo', r.get('備考', '')))
-                    )
-                    count += 1
-                st.success(f"{count} 件を一括登録しました")
-            except Exception as e:
-                st.error(f"エラー: {e}")
+    # 危険エリア：安全ロック付き
+    with st.expander("⚠️ 初期化メニュー（管理者用）"):
+        st.warning("登録データを全て削除します。")
+        
+        # チェックボックスによる安全ロック
+        agree = st.checkbox("データを完全に削除することを理解しました")
+        
+        if agree:
+            if st.button("💥 全データを削除実行", type="primary"):
+                try:
+                    conn = sqlite3.connect('stock.db')
+                    c = conn.cursor()
+                    c.execute('DELETE FROM stocks')
+                    conn.commit()
+                    conn.close()
+                    st.success("削除しました")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"エラー: {e}")
+        else:
+            st.button("💥 全データを削除実行", disabled=True, help="上のチェックボックスを入れてください")
