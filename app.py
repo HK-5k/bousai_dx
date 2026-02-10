@@ -3,6 +3,7 @@ import re
 import json
 import ast
 import uuid
+import inspect
 from datetime import datetime, date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -40,6 +41,17 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+# =========================
+# UI Helper (GPT提案の修正)
+# =========================
+_SUPPORTS_WIDTH = "width" in inspect.signature(st.button).parameters
+
+def button_stretch(label: str, *, key: str, type: str = "secondary", **kwargs) -> bool:
+    """バージョン互換性を保ちつつ、ボタンを横幅いっぱいに広げるヘルパー"""
+    if _SUPPORTS_WIDTH:
+        return st.button(label, key=key, type=type, width="stretch", **kwargs)
+    return st.button(label, key=key, type=type, use_container_width=True, **kwargs)
 
 # =========================
 # Session state
@@ -86,30 +98,72 @@ TOILET_SUBTYPES = [
 BASE_UNIT = {"水・飲料": "L", "主食類": "食", "トイレ・衛生": "回"}
 
 # =========================
-# CSS
+# CSS: スマホ最適化（キー指定による安全なスタイル適用）
 # =========================
 st.markdown(
     """
 <style>
+/* iOSの文字サイズ自動調整を無効化 */
+html { -webkit-text-size-adjust: 100%; }
+
 .stApp { background-color: #f8fafc; }
-.block-container { max-width: 600px !important; margin: 0 auto !important; padding: 1rem 1rem 3rem 1rem !important; }
+.block-container { 
+    max-width: 600px !important; 
+    margin: 0 auto !important; 
+    padding: 1rem 1rem 3rem 1rem !important; 
+}
 h2 { text-align: center; font-weight: 900; color: #0f172a; margin-bottom: 1.5rem !important; }
 
-/* タイル配置 */
-[data-testid="stHorizontalBlock"] { display: flex !important; gap: 12px !important; }
-[data-testid="stHorizontalBlock"] > div { flex: 1 !important; min-width: 0 !important; }
-
-/* ボタン */
-div.stButton > button { border-radius: 12px !important; font-weight: 800 !important; height: 48px !important; }
-div.stButton > button[kind="primary"] {
-    height: 140px !important; background: #fff !important; color: #0f172a !important;
-    border: 1px solid #e2e8f0 !important; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1) !important;
-    font-size: 1.1rem !important; display: flex !important; flex-direction: column !important;
-    align-items: center !important; justify-content: center !important;
+/* --- タイルボタン：keyが tile_ で始まるものだけを巨大化 --- */
+div.stElementContainer[class*="st-key-tile_"] div.stButton > button,
+div.element-container[class*="st-key-tile_"] div.stButton > button {
+    width: 100% !important;
+    height: auto !important;
+    min-height: clamp(120px, 22vw, 170px) !important; /* スマホ幅に応じて伸縮 */
+    padding: clamp(14px, 3.5vw, 22px) !important;
+    
+    border-radius: 18px !important;
+    border: 1px solid #cbd5e1 !important;
+    background: #ffffff !important;
+    box-shadow: 0 6px 16px rgba(15, 23, 42, 0.08) !important;
+    
+    display: flex !important;
+    justify-content: center !important;
+    align-items: center !important;
+    flex-direction: column !important;
 }
-div.stButton > button[kind="primary"]:active { transform: scale(0.96) !important; background: #f1f5f9 !important; }
 
-/* カード */
+/* ボタン内部のテキストサイズ強制適用 */
+div.stElementContainer[class*="st-key-tile_"] div.stButton > button *,
+div.element-container[class*="st-key-tile_"] div.stButton > button * {
+    font-size: clamp(16px, 4.5vw, 22px) !important; /* 文字も大きく */
+    font-weight: 800 !important;
+    line-height: 1.4 !important;
+    white-space: pre-line !important; /* 改行を有効化 */
+    text-align: center !important;
+}
+
+/* 押した時の沈み込み */
+div.stElementContainer[class*="st-key-tile_"] div.stButton > button:active,
+div.element-container[class*="st-key-tile_"] div.stButton > button:active {
+    transform: scale(0.98) !important;
+    background: #f8fafc !important;
+}
+
+/* --- 戻るボタン：keyが back_ で始まるものだけ統一 --- */
+div.stElementContainer[class*="st-key-back_"] div.stButton > button,
+div.element-container[class*="st-key-back_"] div.stButton > button {
+    width: 100% !important;
+    height: 48px !important;
+    border-radius: 12px !important;
+    background: #e2e8f0 !important;
+    border: none !important;
+    box-shadow: none !important;
+    font-weight: 800 !important;
+    color: #475569 !important;
+}
+
+/* カードUI */
 .card { background: white; padding: 1rem; border-radius: 14px; box-shadow: 0 2px 6px rgba(0,0,0,0.05); margin-bottom: 12px; border-left: 6px solid #ccc; }
 .card-ok { border-left-color: #22c55e !important; }
 .card-ng { border-left-color: #ef4444 !important; }
@@ -122,7 +176,7 @@ div.stButton > button[kind="primary"]:active { transform: scale(0.96) !important
 )
 
 # =========================
-# Logic & Data
+# Logic & Data (v3機能維持)
 # =========================
 with st.sidebar:
     st.header("⚙️ 備蓄設定")
@@ -160,7 +214,6 @@ def water_liters(qty, unit, name, memo):
     q = float(qty)
     if u in ["l", "リットル"]: return q
     if u == "ml": return q/1000
-    # 簡易: 本/箱はここでの厳密判定省略し、入力時にL換算させる運用を推奨
     return q if u in ["l"] else 0 
 
 # --- Aggregation ---
@@ -178,7 +231,6 @@ for s in stocks:
         if (uses := toilet_uses(qty, unit)) is not None:
             amounts[cat] += uses
     elif cat == "水・飲料":
-        # 簡易的にLとみなすか、入力済みqtyを使う
         amounts[cat] += qty 
     else:
         amounts[cat] += qty
@@ -189,24 +241,35 @@ for s in stocks:
 # =========================
 # Pages
 # =========================
-def back_home():
-    if st.button("🔙 ホームに戻る", key="back", use_container_width=True): navigate_to("home")
+def back_home(key_suffix):
+    # keyを "back_" で始めることでCSSを適用
+    if button_stretch("🔙 ホームに戻る", key=f"back_{key_suffix}", type="secondary"): 
+        navigate_to("home")
 
 if st.session_state.current_page == "home":
     st.markdown(f"## ⛑️ {APP_TITLE}")
+    st.markdown("<p style='text-align:center; color:#64748b; margin-top:-10px; margin-bottom:20px;'>物資DX台帳 × 自主点検システム</p>", unsafe_allow_html=True)
+    
+    # keyを "tile_" で始めることで、CSSによる巨大化・自動調整を適用
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("📊\n分析レポート\n(充足率)", key="dash", type="primary", use_container_width=True): navigate_to("dashboard")
-        if st.button("✅\n自動自主点検\n(裏取り)", key="insp", type="primary", use_container_width=True): navigate_to("inspection")
+        if button_stretch("📊\n分析レポート\n(充足率)", key="tile_dash", type="primary"): 
+            navigate_to("dashboard")
+        if button_stretch("✅\n自動自主点検\n(裏取り)", key="tile_insp", type="primary"): 
+            navigate_to("inspection")
     with c2:
-        if st.button("📦\n備蓄・登録\n(現場)", key="inv", type="primary", use_container_width=True): navigate_to("inventory")
-        if st.button("💾\nデータ管理\n(CSV)", key="data", type="primary", use_container_width=True): navigate_to("data")
+        if button_stretch("📦\n備蓄・登録\n(現場)", key="tile_inv", type="primary"): 
+            navigate_to("inventory")
+        if button_stretch("💾\nデータ管理\n(CSV)", key="tile_data", type="primary"): 
+            navigate_to("data")
+    
+    st.markdown("---")
     
     if expired_count: st.error(f"🚨 期限切れが {expired_count} 件あります")
     else: st.success("✅ 期限切れはありません")
 
 elif st.session_state.current_page == "inspection":
-    back_home()
+    back_home("insp")
     st.markdown("## ✅ 自動点検 (v3準拠)")
     
     with st.expander("🏢 施設情報 (任意)", expanded=True):
@@ -237,7 +300,7 @@ elif st.session_state.current_page == "inspection":
     card("7-1", "水・食料の備え", amounts["水・飲料"] >= TARGETS["水・飲料"], f"水充足率: {int(amounts['水・飲料']/TARGETS['水・飲料']*100)}%")
 
 elif st.session_state.current_page == "dashboard":
-    back_home()
+    back_home("dash")
     st.markdown("## 📊 充足率")
     for k in ["水・飲料", "主食類", "トイレ・衛生"]:
         pct = min(amounts[k]/TARGETS[k], 1.0)
@@ -246,12 +309,13 @@ elif st.session_state.current_page == "dashboard":
         st.caption(f"現在: {int(amounts[k])} / 目標: {int(TARGETS[k])}")
 
 elif st.session_state.current_page == "inventory":
-    back_home()
+    back_home("inv")
     st.markdown("## 📦 在庫・登録")
     st.info("（ここにAI登録機能が入ります・v2準拠）")
     # 簡易実装のため省略。必要なら inventory 部分のみ詳細追加します
 
 elif st.session_state.current_page == "data":
-    back_home()
+    back_home("data")
     st.markdown("## 💾 データ管理")
+    # ↓ここで utf-8-sig に修正済み（重要！）
     st.download_button("CSV保存", pd.DataFrame(stocks).to_csv().encode('utf-8-sig'), "backup.csv")
