@@ -832,3 +832,4 @@ elif st.session_state.current_page == "data":
 else:
     st.session_state.current_page = "home"
     st.rerun()
+# update
