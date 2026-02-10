@@ -68,7 +68,6 @@ def clear_all():
         conn.commit()
     
 def update_stock(id, **kwargs):
-    # Simplified update
     pass 
     
 def get_recent_names(cat, limit=10):
