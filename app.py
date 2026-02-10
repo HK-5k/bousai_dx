@@ -2,9 +2,11 @@ import os
 import re
 import json
 import ast
-import uuid
+import time
 import inspect
-from datetime import datetime, date, timedelta
+import uuid
+from datetime import datetime, date
+from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -12,30 +14,14 @@ import streamlit as st
 from PIL import Image
 
 try:
-    import google.generativeai as genai
+    import google.generativeai as genai  # legacy SDK
 except Exception:
-    genai = None  # Optional dependency
+    genai = None
 
 import db
 
-# ============================================================
-# App Config
-# ============================================================
-APP_TITLE = "香川防災DX"
-GEMINI_MODEL = (os.environ.get("GEMINI_MODEL", "gemini-1.5-flash") or "gemini-1.5-flash").strip()
 
-# Read API key from env or .env (best-effort)
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-if not GEMINI_API_KEY and os.path.exists(".env"):
-    try:
-        with open(".env", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("GEMINI_API_KEY=") and not line.startswith("#"):
-                    GEMINI_API_KEY = line.split("=", 1)[1].strip().strip('"\'')
-                    break
-    except Exception:
-        pass
+APP_TITLE = "香川防災DX"
 
 st.set_page_config(
     page_title=APP_TITLE,
@@ -43,37 +29,43 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ============================================================
-# UI Helper
-# ============================================================
-_SUPPORTS_WIDTH = "width" in inspect.signature(st.button).parameters
 
-def button_stretch(label: str, *, key: str, type: str = "secondary", **kwargs) -> bool:
-    """Button that stretches full width across its container (Streamlit version compatible)."""
-    if _SUPPORTS_WIDTH:
-        return st.button(label, key=key, type=type, width="stretch", **kwargs)
-    return st.button(label, key=key, type=type, use_container_width=True, **kwargs)
+# -------------------------
+# Session
+# -------------------------
+def ss_init(key: str, default):
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+
+ss_init("current_page", "home")
+ss_init("inv_cat", None)
+ss_init("pending_items", [])  # AI→カート
+ss_init("api_key", "")
+ss_init("model_name", "")
+ss_init("use_rest_transport", True)
+
 
 def navigate_to(page: str) -> None:
     st.session_state.current_page = page
     st.rerun()
 
-# ============================================================
-# Session State
-# ============================================================
-def ss_init(key: str, default):
-    if key not in st.session_state:
-        st.session_state[key] = default
 
-ss_init("current_page", "home")
-ss_init("inv_cat", None)
-ss_init("pending_items", [])
-ss_init("undo_stack", [])
-ss_init("ai_last_raw", "")
+# -------------------------
+# UI helper
+# -------------------------
+_SUPPORTS_WIDTH = "width" in inspect.signature(st.button).parameters
 
-# ============================================================
+
+def button_stretch(label: str, *, key: str, type: str = "secondary", **kwargs) -> bool:
+    if _SUPPORTS_WIDTH:
+        return st.button(label, key=key, type=type, width="stretch", **kwargs)
+    return st.button(label, key=key, type=type, use_container_width=True, **kwargs)
+
+
+# -------------------------
 # Constants
-# ============================================================
+# -------------------------
 CATEGORIES: Dict[str, str] = {
     "水・飲料": "💧",
     "主食類": "🍚",
@@ -84,113 +76,81 @@ CATEGORIES: Dict[str, str] = {
     "その他": "📦",
 }
 
-DUE_LABEL = {"expiry": "賞味期限", "inspection": "点検日", "none": "期限なし"}
-TOILET_SUBTYPES = ["携帯トイレ", "組立トイレ", "仮設トイレ", "トイレ袋", "凝固剤", "その他"]
+DUE_TYPES = ["none", "expiry", "inspection"]
+DUE_LABEL = {"none": "期限なし", "expiry": "賞味期限", "inspection": "点検日"}
 
-# ============================================================
-# CSS: iPhone notch safe-area + tap/click fix + v5 design 유지
-# ============================================================
+ITEM_KIND = ["stock", "capacity"]
+ITEM_KIND_LABEL = {"stock": "在庫（消耗品）", "capacity": "設備能力（耐久財）"}
+
+TOILET_SUBTYPES = ["", "携帯トイレ", "組立トイレ", "仮設トイレ", "トイレ袋", "凝固剤", "その他"]
+
+# 2026時点の現行モデルへ（1.5 / pro-vision は外す）
+DEFAULT_MODELS = [
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+]
+
+
+# -------------------------
+# CSS（ノッチ + ボタン反応 + 見た目）
+# -------------------------
 st.markdown(
     """
 <style>
-/* -----------------------------
-   iOS / Safari basics
---------------------------------*/
 html { -webkit-text-size-adjust: 100%; }
-* { box-sizing: border-box; }
 .stApp { background-color: #f8fafc; }
 
-/* -----------------------------
-   Remove Streamlit top layers
-   IMPORTANT: use display:none (not visibility:hidden) to avoid invisible overlays
---------------------------------*/
-header[data-testid="stHeader"] { display: none !important; pointer-events: none !important; }
-#stDecoration { display: none !important; pointer-events: none !important; }
-div[data-testid="stDecoration"] { display: none !important; pointer-events: none !important; }
-div[data-testid="stToolbar"] { display: none !important; pointer-events: none !important; }
-div[data-testid="stStatusWidget"] { display: none !important; pointer-events: none !important; }
-#MainMenu { display: none !important; }
-footer { display: none !important; }
-
-/* -----------------------------
-   Safe area & layout
-   FIX(最優先): notch対策として "固定値 + safe-area" で確実に押し下げる
---------------------------------*/
+/* ノッチ対策：固定値 + safe-area */
 .block-container {
     max-width: 600px !important;
     margin: 0 auto !important;
-
-    /* ここが最重要: 5rem + safe-area で確実に見切れ防止 */
-    padding-top: calc(5rem + env(safe-area-inset-top, 0px)) !important;
-
-    /* iPhone横向きも想定 */
-    padding-left: calc(1rem + env(safe-area-inset-left, 0px)) !important;
-    padding-right: calc(1rem + env(safe-area-inset-right, 0px)) !important;
-
-    /* ホームインジケータ対策 */
-    padding-bottom: calc(3.25rem + env(safe-area-inset-bottom, 0px)) !important;
+    padding-top: calc(4.75rem + env(safe-area-inset-top)) !important;
+    padding-bottom: calc(4.0rem + env(safe-area-inset-bottom)) !important;
+    padding-left: 0.75rem !important;
+    padding-right: 0.75rem !important;
 }
 
-/* Headings */
-h1, h2, h3 {
-    color: #0f172a !important;
-    font-weight: 900 !important;
-}
 h2 {
-    text-align: center !important;
-    margin: 0 0 1.25rem 0 !important;
+    text-align: center;
+    font-weight: 900;
+    color: #0f172a;
+    margin-top: 0 !important;
+    margin-bottom: 1.25rem !important;
 }
 
-/* -----------------------------
-   Clickability / z-index safety
-   FIX: 透明要素の上被りでタップ不能になるのを防ぐ
---------------------------------*/
-div[data-testid="stAppViewContainer"] { position: relative !important; z-index: 0 !important; }
-section.main { position: relative !important; z-index: 0 !important; }
-.block-container { position: relative !important; z-index: 1 !important; }
-
-/* Buttons above everything (z-index効くように position も付与) */
-div.stButton, div.stDownloadButton { position: relative !important; z-index: 100 !important; }
-div.stButton > button, div.stDownloadButton > button {
+/* タップ不能対策：ボタンを最前面 */
+div.stButton > button {
     position: relative !important;
-    z-index: 1000 !important;
-    pointer-events: auto !important;
-    -webkit-tap-highlight-color: rgba(0,0,0,0);
+    z-index: 50 !important;
+    -webkit-tap-highlight-color: transparent;
 }
 
-/* -----------------------------
-   Tile buttons (key prefix: tile_)
-   v5 design: white tiles + navy text
---------------------------------*/
+/* タイル（tile_） */
 div.stElementContainer[class*="st-key-tile_"] div.stButton > button,
 div.element-container[class*="st-key-tile_"] div.stButton > button {
     width: 100% !important;
-
     height: auto !important;
-    min-height: 155px !important;   /* FIX: 小さくなりすぎ防止 */
+    min-height: clamp(132px, 26vw, 190px) !important;
+    padding: clamp(16px, 4.5vw, 26px) !important;
 
-    padding: 20px 12px !important;
-
-    border-radius: 18px !important;
+    border-radius: 20px !important;
     border: 1px solid #cbd5e1 !important;
     background: #ffffff !important;
-    box-shadow: 0 6px 16px rgba(15, 23, 42, 0.08) !important;
+    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.10) !important;
 
     display: flex !important;
     flex-direction: column !important;
-    justify-content: center !important;
     align-items: center !important;
-    text-align: center !important;
+    justify-content: center !important;
 
-    /* FIX: primaryの白文字を上書き */
     color: #0f172a !important;
 }
 
-/* "魔法のCSS": ボタン内部のspan/divまで文字サイズを強制 */
 div.stElementContainer[class*="st-key-tile_"] div.stButton > button *,
 div.element-container[class*="st-key-tile_"] div.stButton > button * {
-    font-size: 20px !important;      /* FIXED: スマホで読みやすい */
-    font-weight: 900 !important;
+    font-size: clamp(17px, 4.8vw, 22px) !important;
+    font-weight: 800 !important;
     line-height: 1.35 !important;
     white-space: pre-line !important;
     text-align: center !important;
@@ -199,56 +159,218 @@ div.element-container[class*="st-key-tile_"] div.stButton > button * {
 
 div.stElementContainer[class*="st-key-tile_"] div.stButton > button:active,
 div.element-container[class*="st-key-tile_"] div.stButton > button:active {
-    transform: scale(0.98) !important;
+    transform: scale(0.97) !important;
     background: #f1f5f9 !important;
 }
 
-/* -----------------------------
-   Back buttons (key prefix: back_)
---------------------------------*/
+/* 戻る（back_） */
 div.stElementContainer[class*="st-key-back_"] div.stButton > button,
 div.element-container[class*="st-key-back_"] div.stButton > button {
     width: 100% !important;
-    height: 52px !important;
-    border-radius: 12px !important;
+    height: 54px !important;
+    border-radius: 14px !important;
     background: #e2e8f0 !important;
     border: none !important;
-    box-shadow: none !important;
-    font-weight: 900 !important;
-    color: #334155 !important;
+    color: #475569 !important;
+    font-weight: 800 !important;
+    z-index: 60 !important;
 }
 
-/* -----------------------------
-   Cards
---------------------------------*/
+/* カード */
 .card {
-    background: #ffffff;
-    padding: 1rem;
-    border-radius: 14px;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.05);
-    margin-bottom: 12px;
-    border-left: 6px solid #cbd5e1;
+    background: white;
+    padding: 1.1rem;
+    border-radius: 16px;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.05);
+    margin-bottom: 16px;
+    border-left: 8px solid #cbd5e1;
 }
 .card-ok { border-left-color: #22c55e !important; }
 .card-ng { border-left-color: #ef4444 !important; }
-.card-warn { border-left-color: #f59e0b !important; }
 
-/* Expanders: make header easier to tap on mobile */
-div[data-testid="stExpander"] summary { padding: 0.35rem 0 !important; }
-
+#MainMenu { visibility: hidden; }
+footer { visibility: hidden; }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
-# ============================================================
-# Logic: DB & Calculation
-# ============================================================
+
+# -------------------------
+# Helpers
+# -------------------------
+def get_cat_key(cat: Any) -> str:
+    s = str(cat or "")
+    for k in CATEGORIES.keys():
+        if k in s:
+            return k
+    return "その他"
+
+
+def safe_float(x: Any, default: float = 0.0) -> float:
+    try:
+        if isinstance(x, (int, float)):
+            return float(x)
+        s = str(x).strip()
+        if not s:
+            return default
+        m = re.search(r"[-+]?\d+(?:\.\d+)?", s)
+        return float(m.group(0)) if m else default
+    except Exception:
+        return default
+
+
+def parse_date_any(s: Any) -> str:
+    if s is None:
+        return ""
+    ss = str(s).strip()
+    if not ss:
+        return ""
+    try:
+        return date.fromisoformat(ss.split("T")[0]).isoformat()
+    except Exception:
+        pass
+    m = re.search(r"(\d{4})\D(\d{1,2})\D(\d{1,2})", ss)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try:
+            return date(y, mo, d).isoformat()
+        except Exception:
+            return ""
+    return ""
+
+
+def strip_code_fences(text: str) -> str:
+    t = (text or "").strip()
+    t = re.sub(r"^```(?:json)?\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\s*```$", "", t)
+    return t.strip()
+
+
+def extract_json_array(text: str) -> Optional[str]:
+    i = text.find("[")
+    j = text.rfind("]")
+    if i >= 0 and j > i:
+        return text[i : j + 1]
+    return None
+
+
+def parse_json_list(text: str) -> Tuple[Optional[List[Dict[str, Any]]], str]:
+    t = strip_code_fences(text)
+
+    try:
+        obj = json.loads(t)
+        if isinstance(obj, dict):
+            obj = [obj]
+        if isinstance(obj, list):
+            return obj, ""
+        return None, "JSONは解析できたが配列/オブジェクトではありません"
+    except Exception as e1:
+        err1 = str(e1)
+
+    chunk = extract_json_array(t) or ""
+    if chunk:
+        try:
+            obj = json.loads(chunk)
+            if isinstance(obj, dict):
+                obj = [obj]
+            if isinstance(obj, list):
+                return obj, ""
+            return None, "抽出JSONは解析できたが配列/オブジェクトではありません"
+        except Exception as e2:
+            err2 = str(e2)
+    else:
+        err2 = "配列 [] が見つかりません"
+
+    try:
+        lit_src = chunk or t
+        lit_src = lit_src.replace("null", "None").replace("true", "True").replace("false", "False")
+        obj = ast.literal_eval(lit_src)
+        if isinstance(obj, dict):
+            obj = [obj]
+        if isinstance(obj, list):
+            norm = [x for x in obj if isinstance(x, dict)]
+            return norm, ""
+        return None, "literal_eval は成功したが list/dict ではありません"
+    except Exception as e3:
+        err3 = str(e3)
+
+    return None, f"json.loads失敗: {err1} / 抽出json失敗: {err2} / literal_eval失敗: {err3}"
+
+
+def normalize_ai_item(raw: Dict[str, Any], category: str) -> Optional[Dict[str, Any]]:
+    name = str(raw.get("name") or raw.get("item") or "").strip()
+    name = re.sub(r"\s+", " ", name)
+    if not name:
+        return None
+
+    qty = safe_float(raw.get("qty", 1), default=1.0)
+    if qty <= 0:
+        qty = 1.0
+
+    unit = str(raw.get("unit") or "").strip()
+    subtype = str(raw.get("subtype") or "").strip()
+    memo = str(raw.get("memo") or "").strip()
+
+    due_type = str(raw.get("due_type") or "none").strip().lower()
+    if due_type not in DUE_TYPES:
+        due_type = "none"
+    due_date = parse_date_any(raw.get("due_date") or "")
+
+    if category == "トイレ・衛生":
+        if subtype not in TOILET_SUBTYPES:
+            subtype = "その他" if subtype else ""
+    else:
+        subtype = ""
+
+    return {
+        "id": uuid.uuid4().hex,
+        "name": name,
+        "qty": qty,
+        "unit": unit,
+        "category": category,
+        "item_kind": "stock",  # AIに任せない（カートで変更）
+        "subtype": subtype,
+        "due_type": due_type,
+        "due_date": due_date,
+        "memo": memo,
+    }
+
+
+# -------------------------
+# Sidebar
+# -------------------------
 with st.sidebar:
+    st.header("🔑 APIキー設定")
+    api_key = st.text_input(
+        "Google AI StudioのAPIキー",
+        type="password",
+        placeholder="AIzaSy...",
+        value=st.session_state.get("api_key", ""),
+    ).strip()
+    st.session_state.api_key = api_key
+    if not api_key:
+        st.warning("👆 ここにAPIキーを入力してください（AI登録が有効になります）")
+
+    st.markdown("---")
+    st.header("🤖 AIモデル")
+    model_default = st.session_state.get("model_name") or DEFAULT_MODELS[0]
+    model_name = st.selectbox(
+        "使用モデル",
+        DEFAULT_MODELS,
+        index=DEFAULT_MODELS.index(model_default) if model_default in DEFAULT_MODELS else 0,
+    )
+    st.session_state.model_name = model_name
+
+    use_rest = st.toggle("通信方式をRESTに固定（推奨）", value=bool(st.session_state.get("use_rest_transport", True)))
+    st.session_state.use_rest_transport = use_rest
+
+    st.markdown("---")
     st.header("⚙️ 備蓄設定")
     t_pop = st.number_input("想定人数", 1, 1_000_000, 100, 100)
     t_days = st.slider("目標日数", 1, 7, 3)
-    st.info(f"目標: {t_pop:,}人 × {t_days}日分")
+    st.caption("※ AIがグルグルする場合はREST固定＋timeoutが効きます")
+
 
 TARGETS = {
     "水・飲料": t_pop * 3 * t_days,
@@ -256,147 +378,163 @@ TARGETS = {
     "トイレ・衛生": t_pop * 5 * t_days,
 }
 
+
+# -------------------------
+# DB & aggregation
+# -------------------------
 db.init_db()
 stocks = db.get_all_stocks() or []
 today = datetime.now().date()
 
-amounts: Dict[str, float] = {k: 0.0 for k in CATEGORIES}
+amounts = {k: 0.0 for k in CATEGORIES}
 expired_count = 0
-
-def get_cat_key(c: Any) -> str:
-    s = str(c or "")
-    for k in CATEGORIES:
-        if k in s:
-            return k
-    return "その他"
-
-def iso_to_date(s: Any) -> Optional[date]:
-    try:
-        return date.fromisoformat(str(s).split("T")[0])
-    except Exception:
-        return None
-
-def toilet_uses(qty: Any, unit: Any) -> Optional[float]:
-    u = str(unit or "").strip()
-    if u in ["回", "枚", "袋", ""]:
-        try:
-            return float(qty)
-        except Exception:
-            return None
-    return None
 
 for s in stocks:
     cat = get_cat_key(s.get("category"))
-    kind = str(s.get("item_kind", "stock") or "stock")
-    qty = float(s.get("qty", 0) or 0)
-    unit = s.get("unit", "")
+    qty = safe_float(s.get("qty", 0), default=0.0)
+    unit = str(s.get("unit") or "").strip()
 
-    # Exclude "capacity" (durable equipment) from consumable counts, especially water
-    if kind == "capacity" and cat == "水・飲料":
+    if str(s.get("item_kind") or "stock") == "capacity":
         continue
 
     if cat == "トイレ・衛生":
-        uses = toilet_uses(qty, unit)
-        if uses is not None:
-            amounts[cat] += uses
+        if unit in ["回", "枚", "袋", ""]:
+            amounts[cat] += qty
     else:
-        amounts[cat] += qty  # simplified aggregation
-
-    d = iso_to_date(s.get("due_date"))
-    if d and d < today:
-        expired_count += 1
-
-# ============================================================
-# Gemini helpers
-# ============================================================
-@st.cache_resource(show_spinner=False)
-def get_gemini_model(api_key: str):
-    if genai is None:
-        raise RuntimeError("google-generativeai がインストールされていません")
-    genai.configure(api_key=api_key)
-    return genai.GenerativeModel(GEMINI_MODEL)
-
-def _extract_json_array(text: str) -> List[dict]:
-    """
-    Robustly extract a JSON array from Gemini output.
-    - code fences
-    - leading/trailing commentary
-    - single quotes (fallback via ast)
-    """
-    t = (text or "").strip()
-    t = re.sub(r"^```(?:json)?\s*", "", t, flags=re.IGNORECASE)
-    t = re.sub(r"\s*```$", "", t)
-
-    m = re.search(r"\[[\s\S]*\]", t)
-    payload = m.group(0) if m else t
+        amounts[cat] += qty
 
     try:
-        data = json.loads(payload)
+        dd = str(s.get("due_date") or "").split("T")[0]
+        if dd and date.fromisoformat(dd) < today:
+            expired_count += 1
     except Exception:
-        data = ast.literal_eval(payload)
+        pass
 
-    if not isinstance(data, list):
-        return []
-    return [x for x in data if isinstance(x, dict)]
 
-def gemini_extract(pil_img: Image.Image, cat: str) -> Tuple[List[Dict[str, Any]], str]:
-    if not GEMINI_API_KEY:
-        return [], "No API Key"
+# -------------------------
+# Gemini (legacy) stable wrapper
+# -------------------------
+@st.cache_resource(show_spinner=False)
+def _get_model(api_key: str, model_name: str, use_rest_transport: bool):
+    if genai is None:
+        raise RuntimeError("google-generativeai がインストールされていません（requirements を確認）")
 
-    model = get_gemini_model(GEMINI_API_KEY)
-    prompt = f"""
-カテゴリ: {cat}
-画像から防災備蓄品の情報を抽出し、以下のJSON配列のみを返してください（余計な文章は不要）。
+    # gRPC詰まり対策
+    if use_rest_transport:
+        genai.configure(api_key=api_key, transport="rest")
+    else:
+        genai.configure(api_key=api_key)
 
+    generation_config = {
+        "temperature": 0.0,
+        "max_output_tokens": 1024,
+        "response_mime_type": "application/json",  # JSONモード
+    }
+    return genai.GenerativeModel(model_name, generation_config=generation_config)
+
+
+def gemini_extract_from_image(
+    pil_img: Image.Image,
+    category: str,
+    api_key: str,
+    model_name: str,
+    use_rest_transport: bool,
+) -> Tuple[List[Dict[str, Any]], str]:
+    if genai is None:
+        return [], "google-generativeai が import できません（インストールされていない可能性）"
+    if not api_key:
+        return [], "サイドバーでAPIキーを入力してください"
+
+    img = pil_img.convert("RGB")
+    if max(img.size) > 1024:
+        img.thumbnail((1024, 1024))
+
+    try:
+        model = _get_model(api_key, model_name, use_rest_transport)
+
+        prompt = f"""
+あなたは倉庫在庫台帳の入力支援AIです。
+画像から、防災備蓄品の「品名・数量・単位・期限」を抽出してください。
+
+# 重要ルール
+- 出力は **JSON配列のみ**。説明文やMarkdownは禁止。
+- 必ずダブルクォートを使う（' は使わない）。
+- qty は数値（不明なら 1）。
+- due_date は YYYY-MM-DD。不明なら ""。
+- due_type は "expiry" / "inspection" / "none" のいずれか。
+- カテゴリは固定: "{category}"
+- 読み取れない場合は [] を返す。
+
+# 出力スキーマ（このキーだけ）
 [
   {{
     "name": "品名",
     "qty": 1,
     "unit": "単位(L,本,食,回,箱,基など)",
-    "subtype": "トイレの場合のみ(携帯トイレ/組立トイレ/仮設トイレ/トイレ袋/凝固剤/その他)",
+    "subtype": "トイレの場合のみ（携帯トイレ/組立トイレ/仮設トイレ/トイレ袋/凝固剤/その他）それ以外は空文字",
     "due_type": "expiry|inspection|none",
-    "due_date": "YYYY-MM-DD (不明なら空文字)",
-    "memo": "特徴など"
+    "due_date": "YYYY-MM-DD",
+    "memo": "補足"
   }}
 ]
 """.strip()
 
-    res = model.generate_content([prompt, pil_img])
-    raw = getattr(res, "text", "") or ""
-    items = _extract_json_array(raw)
-    return items, raw
+        resp = model.generate_content([prompt, img], request_options={"timeout": 60})
+        raw_text = (getattr(resp, "text", "") or "").strip()
 
-# ============================================================
-# Common UI
-# ============================================================
+        parsed, perr = parse_json_list(raw_text)
+        if parsed is None:
+            return [], f"JSON解析に失敗: {perr}\n---\nRAW:\n{raw_text}"
+
+        out: List[Dict[str, Any]] = []
+        for it in parsed:
+            if isinstance(it, dict):
+                norm = normalize_ai_item(it, category)
+                if norm:
+                    out.append(norm)
+
+        if not out:
+            return [], f"AI出力は取れたが登録候補が0件（品名空など）\nRAW:\n{raw_text}"
+
+        return out, raw_text
+
+    except Exception as e:
+        return [], str(e)
+
+
+# -------------------------
+# UI building blocks
+# -------------------------
 def back_home(key_suffix: str) -> None:
     if button_stretch("🔙 ホームに戻る", key=f"back_{key_suffix}", type="secondary"):
         st.session_state.inv_cat = None
         navigate_to("home")
 
-def render_card(code: str, title: str, ok: bool, ev_html: str) -> None:
+
+def render_card(title: str, ok: bool, html_body: str) -> None:
     cls = "card-ok" if ok else "card-ng"
+    icon = "🟢 適合" if ok else "🔴 不適合"
     st.markdown(
-        f'<div class="card {cls}"><b>{code} {title}</b><br>'
-        f'判定: {"🟢 適合" if ok else "🔴 不適合"}<br>'
-        f'<small>{ev_html}</small></div>',
+        f"""
+<div class="card {cls}">
+  <div style="font-weight:900; margin-bottom:6px;">{title}</div>
+  <div style="font-weight:800; margin-bottom:6px;">{icon}</div>
+  <div style="font-size:0.95rem; color:#334155;">{html_body}</div>
+</div>
+""",
         unsafe_allow_html=True,
     )
 
-# ============================================================
-# Router
-# ============================================================
-page = st.session_state.current_page
 
-# ============================================================
-# 🏠 Home
-# ============================================================
-if page == "home":
+# -------------------------
+# Pages
+# -------------------------
+def page_home() -> None:
     st.markdown(f"## ⛑️ {APP_TITLE}")
-    st.markdown(
-        "<p style='text-align:center; color:#64748b; margin: 0 0 16px 0;'>物資DX台帳 × 自主点検</p>",
-        unsafe_allow_html=True,
-    )
+    st.markdown("<div style='text-align:center; color:#64748b; margin-bottom:18px;'>物資DX台帳 × 自主点検</div>", unsafe_allow_html=True)
+
+    if not st.session_state.api_key:
+        st.info("👈 左上の「＞」からサイドバーを開き、APIキーを入力するとAI登録が有効になります。")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -405,80 +543,166 @@ if page == "home":
         if button_stretch("✅\n自動自主点検\n(裏取り)", key="tile_insp", type="primary"):
             navigate_to("inspection")
     with c2:
-        if button_stretch("📦\n備蓄・登録\n(現場)", key="tile_inv", type="primary"):
+        if button_stretch("📦\n備蓄・登録\n(AI→カート)", key="tile_inv", type="primary"):
             navigate_to("inventory")
         if button_stretch("💾\nデータ管理\n(CSV)", key="tile_data", type="primary"):
             navigate_to("data")
 
     st.markdown("---")
     if expired_count:
-        st.error(f"🚨 期限切れが {expired_count} 件あります")
+        st.error(f"🚨 期限切れ: {expired_count}件")
     else:
-        st.success("✅ 期限切れはありません")
+        st.success("✅ 期限切れなし")
 
-# ============================================================
-# 📊 Dashboard
-# ============================================================
-elif page == "dashboard":
+
+def page_dashboard() -> None:
     back_home("dash")
     st.markdown("## 📊 充足率")
-
     for k in ["水・飲料", "主食類", "トイレ・衛生"]:
-        denom = float(TARGETS.get(k, 0) or 0)
-        pct = min((amounts[k] / denom), 1.0) if denom > 0 else 0.0
-        st.write(f"**{k}**")
+        denom = TARGETS[k] if TARGETS[k] > 0 else 1
+        pct = min(amounts[k] / denom, 1.0)
+        st.write(f"**{CATEGORIES[k]} {k}**")
         st.progress(pct)
-        st.caption(f"現在: {int(amounts[k]):,} / 目標: {int(denom):,}（{int(pct*100)}%）")
+        st.caption(f"現在: {int(amounts[k]):,} / 目標: {int(TARGETS[k]):,}")
 
-# ============================================================
-# ✅ Inspection
-# ============================================================
-elif page == "inspection":
+
+def page_inspection() -> None:
     back_home("insp")
     st.markdown("## ✅ 自動点検")
 
-    with st.expander("🏢 施設情報 (任意)", expanded=True):
-        f_toilets = st.number_input("既設トイレ(便器数)", 0, 10_000, 0, key="f_toilets")
+    with st.expander("🏢 施設情報（任意）", expanded=True):
+        f_toilets = st.number_input("既設トイレ(便器数)", 0, 1000, 0, key="f_toilets")
 
-    # 6-5 logic (portable uses + booth counts)
-    portable_uses = float(amounts.get("トイレ・衛生", 0) or 0)
-
-    units_total = float(f_toilets) + sum(
-        float(s.get("qty", 0) or 0)
+    p_uses = amounts["トイレ・衛生"]
+    units = float(f_toilets) + sum(
+        safe_float(s.get("qty", 0), 0.0)
         for s in stocks
-        if get_cat_key(s.get("category")) == "トイレ・衛生"
-        and (s.get("subtype") in ["仮設トイレ", "組立トイレ"])
+        if get_cat_key(s.get("category")) == "トイレ・衛生" and str(s.get("subtype") or "") in ["仮設トイレ", "組立トイレ"]
     )
 
-    # Required uses: at least 3 days, or user-selected t_days (whichever larger)
     need_uses = max(t_pop * 5 * 3, t_pop * 5 * t_days)
-
-    # Required booths: short-term 50 ppl/booth, long-term 20 ppl/booth (simple rule)
     need_units = (t_pop + 49) // 50 if t_days <= 2 else (t_pop + 19) // 20
 
-    ok_uses = portable_uses >= need_uses
-    ok_units = units_total >= need_units
-
-    msg_65 = (
-        f"携帯トイレ等(回): {int(portable_uses):,} / 必要: {int(need_uses):,}<br>"
-        f"トイレ基数(基): {int(units_total):,} / 必要: {int(need_units):,}<br>"
-        f"※ 基数 = 既設 + 仮設 + 組立"
+    ok_65 = (p_uses >= need_uses) and (units >= need_units)
+    render_card(
+        "6-5 簡易トイレ等の備え",
+        ok_65,
+        f"携帯: {int(p_uses):,}回 / 必要: {int(need_uses):,}回<br>基数: {int(units):,}基 / 必要: {int(need_units):,}基",
     )
-    render_card("6-5", "簡易トイレ等の備え", (ok_uses and ok_units), msg_65)
 
-    w_ok = amounts["水・飲料"] >= TARGETS["水・飲料"]
-    w_pct = int((amounts["水・飲料"] / TARGETS["水・飲料"]) * 100) if TARGETS["水・飲料"] > 0 else 0
-    render_card("7-1", "水・食料の備え（簡易）", w_ok, f"水: {int(amounts['水・飲料']):,} / 目標: {int(TARGETS['水・飲料']):,}（{w_pct}%）")
+    ok_71 = amounts["水・飲料"] >= TARGETS["水・飲料"]
+    render_card(
+        "7-1 飲料水の備え",
+        ok_71,
+        f"水: {int(amounts['水・飲料']):,} / 目標: {int(TARGETS['水・飲料']):,}",
+    )
 
-# ============================================================
-# 📦 Inventory
-# ============================================================
-elif page == "inventory":
+
+def _cart_editor(category: str) -> None:
+    pending: List[Dict[str, Any]] = st.session_state.pending_items or []
+    pending_cat = [p for p in pending if p.get("category") == category]
+
+    if not pending_cat:
+        st.info("🛒 まだカートに入っていません（AI解析するとここに出ます）")
+        return
+
+    st.markdown("### 🛒 カート（登録前に修正できます）")
+    to_delete_ids: List[str] = []
+
+    for p in pending_cat:
+        pid = p.get("id") or uuid.uuid4().hex
+        p["id"] = pid
+
+        title = f"{p.get('name','(no name)')}  ×{int(p.get('qty',1))}"
+        with st.expander(title, expanded=True):
+            p["name"] = st.text_input("品名", value=str(p.get("name", "")), key=f"cart_name_{pid}")
+            p["qty"] = st.number_input("数量", min_value=0.0, value=float(p.get("qty", 1.0)), step=1.0, key=f"cart_qty_{pid}")
+            p["unit"] = st.text_input("単位", value=str(p.get("unit", "")), key=f"cart_unit_{pid}")
+            p["memo"] = st.text_input("メモ", value=str(p.get("memo", "")), key=f"cart_memo_{pid}")
+
+            if category == "水・飲料":
+                kind = st.selectbox(
+                    "種別（飲料水の二重計上防止）",
+                    ITEM_KIND,
+                    index=ITEM_KIND.index(p.get("item_kind", "stock")) if p.get("item_kind", "stock") in ITEM_KIND else 0,
+                    format_func=lambda x: ITEM_KIND_LABEL.get(x, x),
+                    key=f"cart_kind_{pid}",
+                )
+                p["item_kind"] = kind
+
+            if category == "トイレ・衛生":
+                stype = st.selectbox(
+                    "種別（トイレ内訳）",
+                    TOILET_SUBTYPES,
+                    index=TOILET_SUBTYPES.index(p.get("subtype", "")) if p.get("subtype", "") in TOILET_SUBTYPES else 0,
+                    key=f"cart_subtype_{pid}",
+                )
+                p["subtype"] = stype
+
+            due_type = st.selectbox(
+                "期限種別",
+                DUE_TYPES,
+                index=DUE_TYPES.index(p.get("due_type", "none")) if p.get("due_type", "none") in DUE_TYPES else 0,
+                format_func=lambda x: DUE_LABEL.get(x, x),
+                key=f"cart_duetype_{pid}",
+            )
+            p["due_type"] = due_type
+
+            if due_type != "none":
+                current = parse_date_any(p.get("due_date"))
+                default_d = date.fromisoformat(current) if current else date.today()
+                date_key = f"cart_duedate_{pid}"
+                if date_key not in st.session_state:
+                    st.session_state[date_key] = default_d
+                dval = st.date_input(DUE_LABEL[due_type], key=date_key)
+                p["due_date"] = dval.isoformat() if isinstance(dval, date) else ""
+            else:
+                p["due_date"] = ""
+
+            if st.button("🗑️ この行をカートから削除", key=f"cart_del_{pid}"):
+                to_delete_ids.append(pid)
+
+    if to_delete_ids:
+        st.session_state.pending_items = [x for x in st.session_state.pending_items if x.get("id") not in to_delete_ids]
+        st.rerun()
+
+    st.markdown("---")
+    if st.button("✅ このカテゴリのカートをDBへ登録", key=f"cart_commit_{category}", type="primary", use_container_width=True):
+        commit_items = []
+        for p in (st.session_state.pending_items or []):
+            if p.get("category") != category:
+                continue
+            name = str(p.get("name") or "").strip()
+            if not name:
+                continue
+            commit_items.append(
+                {
+                    "name": name,
+                    "qty": safe_float(p.get("qty", 0), 0.0),
+                    "unit": str(p.get("unit") or ""),
+                    "category": category,
+                    "item_kind": str(p.get("item_kind") or "stock"),
+                    "subtype": str(p.get("subtype") or ""),
+                    "due_type": str(p.get("due_type") or "none"),
+                    "due_date": str(p.get("due_date") or ""),
+                    "memo": str(p.get("memo") or ""),
+                }
+            )
+        if not commit_items:
+            st.warning("登録できるデータがありません（品名が空など）")
+            return
+        res = db.bulk_upsert(commit_items)
+        st.session_state.pending_items = [x for x in (st.session_state.pending_items or []) if x.get("category") != category]
+        st.success(f"登録しました（inserted={res.get('inserted',0)}, updated={res.get('updated',0)}）")
+        st.rerun()
+
+
+def page_inventory() -> None:
     back_home("inv")
+    st.markdown("## 📦 備蓄・登録（AI→カート→登録）")
 
-    # Category selection (tile buttons)
     if st.session_state.inv_cat is None:
-        st.markdown("## 📦 カテゴリ選択")
+        st.markdown("### カテゴリ選択")
         cols = st.columns(2)
         for i, (cat, icon) in enumerate(CATEGORIES.items()):
             with cols[i % 2]:
@@ -486,96 +710,125 @@ elif page == "inventory":
                 if button_stretch(label, key=f"tile_cat_{cat}", type="primary"):
                     st.session_state.inv_cat = cat
                     st.rerun()
+        return
 
-    else:
-        cat = st.session_state.inv_cat
-        st.markdown(f"## {CATEGORIES[cat]} {cat}")
+    cat = st.session_state.inv_cat
+    st.markdown(f"## {CATEGORIES[cat]} {cat}")
 
-        if button_stretch("🔙 カテゴリ一覧に戻る", key="back_cat", type="secondary"):
-            st.session_state.inv_cat = None
-            st.rerun()
+    if button_stretch("🔙 カテゴリ一覧に戻る", key="back_cat", type="secondary"):
+        st.session_state.inv_cat = None
+        st.rerun()
 
-        tab1, tab2 = st.tabs(["📸 AI登録", "📝 リスト"])
+    tab_ai, tab_cart, tab_list = st.tabs(["📸 AI解析", "🛒 カート編集", "📝 DB在庫リスト"])
 
-        with tab1:
-            if genai is None:
-                st.warning("google-generativeai が未インストールです。requirements.txt を確認してください。")
-            elif not GEMINI_API_KEY:
-                st.warning("GEMINI_API_KEY が未設定です（環境変数 or .env）")
+    with tab_ai:
+        st.markdown("### 📸 写真から抽出（まずカートに入ります）")
 
-            img_file = st.camera_input("撮影（iPhone対応）")
-            if not img_file:
-                img_file = st.file_uploader("または画像アップロード", type=["jpg", "jpeg", "png"])
+        colA, colB = st.columns(2)
+        with colA:
+            img_file = st.camera_input("撮影")
+        with colB:
+            img_file2 = st.file_uploader("または画像アップロード", type=["jpg", "jpeg", "png"])
+            if img_file2 is not None:
+                img_file = img_file2
 
-            if img_file and st.button("解析開始", key=f"run_ai_{cat}", type="primary"):
-                with st.spinner("AI解析中..."):
-                    try:
-                        pil_img = Image.open(img_file)
-                        items, raw = gemini_extract(pil_img, cat)
-                        st.session_state.ai_last_raw = raw
+        if genai is None:
+            st.error("google-generativeai がインストールされていません。requirements.txt を確認してください。")
+            return
 
-                        if not items:
-                            st.error("AIの返却が空でした。写真のブレや写り込みを確認してください。")
-                        else:
-                            to_insert: List[Dict[str, Any]] = []
-                            for it in items:
-                                to_insert.append({
-                                    "name": str(it.get("name", "")).strip() or "（品名未設定）",
-                                    "qty": float(it.get("qty", 1) or 1),
-                                    "category": cat,
-                                    "unit": str(it.get("unit", "") or "").strip(),
-                                    "subtype": str(it.get("subtype", "") or "").strip(),
-                                    "due_type": str(it.get("due_type", "none") or "none").strip(),
-                                    "due_date": str(it.get("due_date", "") or "").strip(),
-                                    "memo": str(it.get("memo", "") or "").strip(),
-                                    "item_kind": "stock",
-                                })
-                            db.bulk_upsert(to_insert)
-                            st.success(f"登録しました（{len(to_insert)}件）")
-                            st.rerun()
-                    except Exception as e:
-                        st.error(f"エラー: {e}")
-                        with st.expander("AI raw output（デバッグ）", expanded=False):
-                            st.code(st.session_state.get("ai_last_raw", ""), language="text")
+        if img_file is not None:
+            try:
+                pil = Image.open(BytesIO(img_file.getvalue()))
+                st.image(pil, caption="入力画像（縮小表示）", use_container_width=True)
+            except Exception as e:
+                st.error(f"画像の読み込みに失敗しました: {e}")
+                pil = None
+        else:
+            pil = None
 
-        with tab2:
-            rows = [s for s in stocks if get_cat_key(s.get("category")) == cat]
-            if not rows:
-                st.info("まだ在庫がありません。")
+        if pil is None:
+            st.info("画像を撮影/選択してください。")
+            return
 
-            for s in rows:
-                qty = int(float(s.get("qty", 0) or 0))
-                title = f"{s.get('name','(no name)')} (×{qty})"
-                with st.expander(title):
-                    if s.get("unit"):
-                        st.write(f"単位: {s.get('unit','')}")
-                    if s.get("subtype"):
-                        st.write(f"種別: {s.get('subtype')}")
-                    if s.get("due_date"):
-                        st.write(f"{DUE_LABEL.get(s.get('due_type','none'), s.get('due_type','none'))}: {s.get('due_date')}")
-                    if s.get("memo"):
-                        st.caption(s.get("memo"))
+        if not st.session_state.api_key:
+            st.warning("⚠️ サイドバーでAPIキーを入力してください。")
+            return
 
-                    if st.button("削除", key=f"del_{s.get('id')}"):
-                        db.delete_stock(s.get("id"))
-                        st.rerun()
+        if st.button("解析してカートに追加", key="ai_run", type="primary", use_container_width=True):
+            with st.spinner("AI解析中...（最大60秒でタイムアウトします）"):
+                t0 = time.time()
+                items, raw = gemini_extract_from_image(
+                    pil,
+                    cat,
+                    st.session_state.api_key,
+                    st.session_state.model_name,
+                    st.session_state.use_rest_transport,
+                )
+                elapsed = time.time() - t0
 
-# ============================================================
-# 💾 Data
-# ============================================================
-elif page == "data":
+            if not items:
+                st.error(f"認識失敗 / 0件: {raw}")
+            else:
+                st.session_state.pending_items = (st.session_state.pending_items or []) + items
+                st.success(f"カートに追加しました: {len(items)}件（{elapsed:.1f}s）")
+                with st.expander("RAW（デバッグ用）"):
+                    st.code(raw[:4000])
+                st.rerun()
+
+    with tab_cart:
+        _cart_editor(cat)
+
+    with tab_list:
+        rows = [s for s in stocks if get_cat_key(s.get("category")) == cat]
+        if not rows:
+            st.info("このカテゴリの在庫はまだありません。")
+        for s in rows:
+            title = f"{s.get('name','')}（×{safe_float(s.get('qty',0),0):g}{s.get('unit','')}）"
+            with st.expander(title):
+                st.write(f"種別: {ITEM_KIND_LABEL.get(str(s.get('item_kind') or 'stock'), str(s.get('item_kind') or 'stock'))}")
+                if s.get("subtype"):
+                    st.write(f"種別(トイレ): {s.get('subtype')}")
+                if s.get("due_date"):
+                    st.write(f"期限: {s.get('due_type','none')} {s.get('due_date')}")
+                if s.get("memo"):
+                    st.write(f"メモ: {s.get('memo')}")
+                if st.button("削除", key=f"del_{s.get('id')}"):
+                    db.delete_stock(int(s.get("id")))
+                    st.rerun()
+
+
+def page_data() -> None:
     back_home("data")
     st.markdown("## 💾 データ管理")
-
     df = pd.DataFrame(stocks)
+
     st.download_button(
-        "📥 CSV保存",
+        "📥 CSV保存（utf-8-sig）",
         df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="backup.csv",
-        mime="text/csv",
+        file_name=f"bousai_backup_{datetime.now().strftime('%Y%m%d')}.csv",
+        use_container_width=True,
     )
 
+    with st.expander("⚠️ 全データ削除（注意）"):
+        if st.button("💥 全データ削除", key="clear_all", type="primary"):
+            db.clear_all()
+            st.success("削除しました")
+            st.rerun()
+
+
+# -------------------------
+# Router
+# -------------------------
+if st.session_state.current_page == "home":
+    page_home()
+elif st.session_state.current_page == "dashboard":
+    page_dashboard()
+elif st.session_state.current_page == "inspection":
+    page_inspection()
+elif st.session_state.current_page == "inventory":
+    page_inventory()
+elif st.session_state.current_page == "data":
+    page_data()
 else:
-    # Fallback
     st.session_state.current_page = "home"
     st.rerun()
