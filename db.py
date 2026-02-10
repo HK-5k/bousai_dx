@@ -15,7 +15,6 @@ def normalize_name(name):
 
 def init_db():
     with get_conn() as conn:
-        # v3 schema
         conn.execute("""
             CREATE TABLE IF NOT EXISTS stocks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,7 +32,7 @@ def init_db():
                 updated_at TEXT
             )
         """)
-        # カラム追加用 (既存DB移行)
+        # カラム追加用
         try:
             conn.execute("ALTER TABLE stocks ADD COLUMN item_kind TEXT DEFAULT 'stock'")
             conn.execute("ALTER TABLE stocks ADD COLUMN subtype TEXT DEFAULT ''")
@@ -46,14 +45,30 @@ def get_all_stocks():
         return [dict(r) for r in conn.execute("SELECT * FROM stocks").fetchall()]
 
 def bulk_upsert(items, atomic=True):
+    # 重複合算ロジック (v3仕様)
     with get_conn() as conn:
         for it in items:
-            conn.execute("""
-                INSERT INTO stocks (name, qty, unit, category, item_kind, subtype, due_type, due_date, memo, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (it.get('name'), it.get('qty'), it.get('unit'), it.get('category'), it.get('item_kind','stock'), 
-                  it.get('subtype',''), it.get('due_type'), it.get('due_date'), it.get('memo'), 
-                  datetime.now().isoformat(), datetime.now().isoformat()))
+            name = it.get('name')
+            category = it.get('category')
+            due_date = it.get('due_date')
+            
+            # 同じ品名・カテゴリ・期限があれば数量を加算、なければ新規作成
+            existing = conn.execute(
+                "SELECT id, qty FROM stocks WHERE name=? AND category=? AND due_date=?",
+                (name, category, due_date)
+            ).fetchone()
+            
+            if existing:
+                new_qty = float(existing['qty']) + float(it.get('qty', 0))
+                conn.execute("UPDATE stocks SET qty=?, updated_at=? WHERE id=?", 
+                             (new_qty, datetime.now().isoformat(), existing['id']))
+            else:
+                conn.execute("""
+                    INSERT INTO stocks (name, qty, unit, category, item_kind, subtype, due_type, due_date, memo, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (name, it.get('qty'), it.get('unit'), category, it.get('item_kind','stock'), 
+                      it.get('subtype',''), it.get('due_type'), it.get('due_date'), it.get('memo'), 
+                      datetime.now().isoformat(), datetime.now().isoformat()))
         conn.commit()
     return {"inserted": len(items)}
 
