@@ -43,12 +43,12 @@ st.set_page_config(
 )
 
 # =========================
-# UI Helper (GPT提案の修正)
+# UI Helper (スマホ対策)
 # =========================
 _SUPPORTS_WIDTH = "width" in inspect.signature(st.button).parameters
 
 def button_stretch(label: str, *, key: str, type: str = "secondary", **kwargs) -> bool:
-    """バージョン互換性を保ちつつ、ボタンを横幅いっぱいに広げるヘルパー"""
+    """ボタンを横幅いっぱいに広げるヘルパー"""
     if _SUPPORTS_WIDTH:
         return st.button(label, key=key, type=type, width="stretch", **kwargs)
     return st.button(label, key=key, type=type, use_container_width=True, **kwargs)
@@ -98,7 +98,7 @@ TOILET_SUBTYPES = [
 BASE_UNIT = {"水・飲料": "L", "主食類": "食", "トイレ・衛生": "回"}
 
 # =========================
-# CSS: スマホ最適化（キー指定による安全なスタイル適用）
+# CSS: デザイン修正の心臓部
 # =========================
 st.markdown(
     """
@@ -133,7 +133,7 @@ div.element-container[class*="st-key-tile_"] div.stButton > button {
     flex-direction: column !important;
 }
 
-/* ボタン内部のテキストサイズ強制適用 */
+/* ★ここが重要：ボタン内部のテキストサイズ強制適用 */
 div.stElementContainer[class*="st-key-tile_"] div.stButton > button *,
 div.element-container[class*="st-key-tile_"] div.stButton > button * {
     font-size: clamp(16px, 4.5vw, 22px) !important; /* 文字も大きく */
@@ -208,13 +208,6 @@ def toilet_uses(qty, unit):
     u = str(unit).strip()
     if u in ["回", "枚", "袋"]: return float(qty)
     return None
-
-def water_liters(qty, unit, name, memo):
-    u = str(unit).strip().lower()
-    q = float(qty)
-    if u in ["l", "リットル"]: return q
-    if u == "ml": return q/1000
-    return q if u in ["l"] else 0 
 
 # --- Aggregation ---
 for s in stocks:
