@@ -96,16 +96,17 @@ chmod +x /tmp/vps_final_verify.sh
 bash /tmp/vps_final_verify.sh
 ```
 
-**vps_final_verify の合格ライン（これが揃えば完了）**
+**以下が 全部揃えば「修正完了」**
 
 - OK: py_compile
-- OK: ENV_GEMINI defined once / OK: EFFECTIVE_GEMINI_KEY defined once
-- OK: old configure absent
-- OK: configure uses EFFECTIVE
-- OK: no hardcoded GEMINI_API_KEY
-- `/proc/$pid/environ` で `GEMINI_API_KEY=SET`（と `OPENAI_API_KEY=SET`）
-- OK: HTTP 200 ＋ `ss` で `:8501` LISTEN
+- ENV_GEMINI 定義回数 = 1、EFFECTIVE_GEMINI_KEY 定義回数 = 1
+- `genai.configure(... api_key=api_key ...)` が 0 件
+- `genai.configure(... api_key=EFFECTIVE_GEMINI_KEY ...)` が 1 件以上
+- GEMINI_API_KEY=SET（`/proc/$pid/environ` で確認。値はマスク）
+- HTTP 200（http://127.0.0.1:8501）& `ss` で `:8501` LISTEN
 - `systemctl show` で ActiveState=active / SubState=running / ExecMainStatus=0 かつ NRestarts が増え続けない
+
+※ HTTP 200 / LISTEN だけでは「ENV のキーが使われた証拠」にならない（起動してるだけの可能性がある）ので、上のセット判定を採用。
 
 この流れなら、heredoc 混入・SyntaxError の再発をほぼ潰せます。
 
@@ -250,15 +251,9 @@ sudo journalctl -u "$SVC" -n 80 --no-pager
 
 **7) restart & stability:** `systemctl show` で **ActiveState=active / SubState=running / ExecMainStatus=0** が安定していること。**NRestarts** が増え続ける場合はクラッシュ→再起動ループの可能性があるので要確認。
 
-### 最終的な「修正完了」の証拠（この 5 つが揃ってはじめて完了）
+### 最終的な「修正完了」の証拠
 
-「HTTP 200 / LISTEN」は“起動している”だけで、修正完了の証拠にはなりません。以下が揃ってはじめて完了です。
-
-- **(a)** py_compile OK  
-- **(b)** old configure 0 件（`genai.configure(api_key=api_key` が無い）  
-- **(c)** プロセスに `GEMINI_API_KEY=SET` が渡っている  
-- **(d)** HTTP 200 と `ss` で :8501 LISTEN  
-- **(e)** NRestarts が増え続けていない（安定稼働）
+上記「**以下が 全部揃えば「修正完了」**」のチェックリストが揃ってはじめて完了です（※ 同上：HTTP 200 / LISTEN 単体では不十分）。
 
 ---
 
